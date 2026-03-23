@@ -1,0 +1,27 @@
+Revision Planning Notes
+=======================
+
+Observed weak topics:
+- Gradient derivations for softmax cross entropy
+- TCP congestion recovery edge-cases
+- Dynamic programming recurrence design
+- Binary search on answer patterns
+
+Recommended 7-day structure:
+Day 1: Diagnose weak topics and collect 2 representative problems per topic.
+Day 2: Deep focus on theoretical foundations (definitions, derivations, edge cases).
+Day 3: Timed practice set for topic A and B with post-mortem.
+Day 4: Timed practice set for topic C and D with post-mortem.
+Day 5: Mixed mock session (all weak topics), then error log categorization.
+Day 6: Re-attempt only previously failed questions without looking at solutions.
+Day 7: Final recap sheet and 30-minute oral explanation of each weak topic.
+
+Spacing recommendation:
+- Start each day with 15-minute recall of prior day mistakes.
+- End each day with a compact "what I still miss" list.
+
+Measurable goals:
+- Track accuracy percentage per topic.
+- Track average solve time.
+- Promote a topic from weak to stable only after two clean sessions.
+

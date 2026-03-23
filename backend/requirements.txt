@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.32,<1
+python-multipart>=0.0.19
+numpy>=2.2
+PyPDF2>=3.0
+cryptography>=44,<46

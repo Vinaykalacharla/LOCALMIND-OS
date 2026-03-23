@@ -1,0 +1,211 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --bg-base: #0b1020;
+  --bg-subtle: #11172a;
+  --panel-main: rgba(17, 23, 42, 0.96);
+  --panel-muted: rgba(20, 27, 46, 0.92);
+  --panel-soft: rgba(255, 255, 255, 0.025);
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.12);
+  --text-main: #f8fafc;
+  --text-soft: #d7deea;
+  --text-muted: #9aa7bd;
+  --accent: #77a7ff;
+  --accent-strong: #5a91f2;
+  --success: #74c69d;
+  --warning: #f2c572;
+  --danger: #ef8b8b;
+  --shadow-panel: 0 14px 32px rgba(0, 0, 0, 0.22);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  margin: 0;
+  background: var(--bg-base);
+}
+
+body {
+  min-height: 100%;
+  margin: 0;
+  background:
+    radial-gradient(circle at top, rgba(119, 167, 255, 0.08), transparent 22%),
+    linear-gradient(180deg, #0b1020 0%, #0f1526 100%);
+  color: var(--text-main);
+  font-family: "Aptos", "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: rgba(119, 167, 255, 0.22);
+  color: white;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(154, 167, 189, 0.34);
+  background-clip: padding-box;
+}
+
+@layer base {
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: "Aptos Display", "Aptos", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+    letter-spacing: -0.03em;
+  }
+}
+
+@layer components {
+  .font-display {
+    font-family: "Aptos Display", "Aptos", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  }
+
+  .shell-panel {
+    @apply rounded-[18px] border;
+    border-color: var(--line);
+    background: var(--panel-main);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .shell-panel-muted {
+    @apply rounded-[16px] border;
+    border-color: var(--line);
+    background: var(--panel-muted);
+  }
+
+  .shell-panel-soft {
+    @apply rounded-[14px] border;
+    border-color: rgba(255, 255, 255, 0.06);
+    background: var(--panel-soft);
+  }
+
+  .eyebrow {
+    @apply text-[11px] font-medium uppercase tracking-[0.24em];
+    color: var(--text-muted);
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-[12px] px-4 py-2.5 text-sm font-semibold transition;
+    background: linear-gradient(180deg, #87b4ff 0%, #6f9fff 100%);
+    color: #07101f;
+  }
+
+  .btn-primary:hover {
+    background: linear-gradient(180deg, #90baff 0%, #79a7ff 100%);
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-[12px] border px-4 py-2.5 text-sm font-medium transition;
+    border-color: var(--line-strong);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-soft);
+  }
+
+  .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.04);
+    color: white;
+  }
+
+  .metric-tile {
+    @apply rounded-[14px] border p-4;
+    border-color: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .tag {
+    @apply inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium;
+    border-color: rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--text-soft);
+  }
+
+  .status-pill {
+    @apply inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium;
+    border-color: rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--text-soft);
+  }
+
+  .status-pill::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--success);
+  }
+
+  .status-pill.warn::before {
+    background: var(--warning);
+  }
+
+  .status-pill.danger::before {
+    background: var(--danger);
+  }
+
+  .input-shell {
+    @apply w-full rounded-[12px] border px-4 py-3 text-sm text-white outline-none transition;
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .input-shell:focus {
+    border-color: rgba(119, 167, 255, 0.42);
+    box-shadow: 0 0 0 1px rgba(119, 167, 255, 0.14);
+  }
+
+  .signal-grid {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  .animate-rise {
+    animation: rise-in 0.28s ease both;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .btn-primary,
+  .btn-secondary {
+    animation: none !important;
+    transition: none !important;
+  }
+}

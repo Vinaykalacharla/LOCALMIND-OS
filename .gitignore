@@ -1,0 +1,32 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Backend runtime
+backend/.venv/
+backend/.venv313/
+backend/server.out.log
+backend/server.err.log
+backend/data/*
+!backend/data/README.md
+backend/models/*.gguf
+!backend/models/README.md
+
+# Frontend runtime
+frontend/node_modules/
+frontend/.next/
+frontend/server.out.log
+frontend/server.err.log
+frontend/tsconfig.tsbuildinfo
+
+# Temporary / local staging
+__remote_inspect/

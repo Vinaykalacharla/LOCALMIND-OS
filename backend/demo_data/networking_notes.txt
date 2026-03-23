@@ -1,0 +1,25 @@
+TCP Congestion Control Notes
+============================
+
+1. Slow Start:
+- TCP begins with a small congestion window (cwnd).
+- cwnd grows exponentially, usually doubling each RTT, until packet loss or ssthresh is reached.
+
+2. Congestion Avoidance:
+- After slow start threshold (ssthresh), cwnd grows linearly.
+- Additive increase prevents aggressive bursts.
+
+3. Loss Detection:
+- Timeout indicates severe congestion; cwnd resets to 1 MSS and ssthresh is reduced.
+- Triple duplicate ACK indicates moderate congestion.
+
+4. Fast Retransmit:
+- On three duplicate ACKs, sender retransmits lost packet immediately.
+
+5. Fast Recovery:
+- Instead of returning to full slow start, sender reduces cwnd and recovers faster.
+- Typical behavior: set ssthresh = cwnd/2, then continue with congestion avoidance.
+
+Practical takeaway:
+TCP aims for fairness and stability by increasing slowly when network is near capacity and reducing quickly after loss.
+

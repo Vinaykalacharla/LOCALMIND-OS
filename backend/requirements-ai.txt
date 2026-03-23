@@ -1,0 +1,8 @@
+# Optional packages for the richer local-AI stack.
+# Install with: pip install -r requirements.txt -r requirements-ai.txt
+
+PyMuPDF>=1.26
+sentence-transformers>=3.4
+faiss-cpu>=1.10
+spacy>=3.8
+llama-cpp-python>=0.3
