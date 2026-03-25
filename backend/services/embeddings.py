@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -8,6 +9,8 @@ import numpy as np
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}")
+HASHED_TFIDF_DIM = 2048
+HASHED_TFIDF_VERSION = "stable-blake2b-v1"
 
 
 def _tokenize(text: str) -> List[str]:
@@ -35,7 +38,8 @@ class HashedTfidfEncoder:
         self.fitted = False
 
     def _index(self, token: str) -> int:
-        return hash(token) % self.dim
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, byteorder="little", signed=False) % self.dim
 
     def fit(self, texts: List[str]) -> None:
         n_docs = max(1, len(texts))
@@ -66,9 +70,9 @@ class HashedTfidfEncoder:
 class EmbeddingService:
     def __init__(self) -> None:
         self.mode = "hashed-tfidf"
-        self.model_name = "hashed-tfidf-2048"
+        self.model_name = f"hashed-tfidf-{HASHED_TFIDF_DIM}"
         self._st_model = None
-        self._fallback = HashedTfidfEncoder(dim=2048)
+        self._fallback = HashedTfidfEncoder(dim=HASHED_TFIDF_DIM)
         self._initialize_primary()
 
     def _initialize_primary(self) -> None:
@@ -84,8 +88,25 @@ class EmbeddingService:
             self.model_name = model_name
         except Exception:
             self.mode = "hashed-tfidf"
-            self.model_name = "hashed-tfidf-2048"
+            self.model_name = f"hashed-tfidf-{self._fallback.dim}"
             self._st_model = None
+
+    def index_signature(self) -> str:
+        if self.mode == "sentence-transformers" and self._st_model is not None:
+            return f"sentence-transformers:{self.model_name}"
+        return f"hashed-tfidf:{self._fallback.dim}:{HASHED_TFIDF_VERSION}"
+
+    def prepare_runtime(self, texts: List[str]) -> None:
+        if self.mode == "sentence-transformers" and self._st_model is not None:
+            return
+
+        self.mode = "hashed-tfidf"
+        self.model_name = f"hashed-tfidf-{self._fallback.dim}"
+        if texts:
+            self._fallback.fit(texts)
+            return
+
+        self._fallback = HashedTfidfEncoder(dim=self._fallback.dim)
 
     def embed_corpus(self, texts: List[str]) -> EmbeddingResult:
         if not texts:
@@ -104,7 +125,7 @@ class EmbeddingService:
         self._fallback.fit(texts)
         matrix = self._fallback.transform(texts)
         self.mode = "hashed-tfidf"
-        self.model_name = "hashed-tfidf-2048"
+        self.model_name = f"hashed-tfidf-{self._fallback.dim}"
         return EmbeddingResult(vectors=matrix, model_name=self.model_name, mode=self.mode)
 
     def embed_query(self, query: str) -> np.ndarray:

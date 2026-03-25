@@ -31,8 +31,13 @@ export default function SourceModal({ item, onClose }: SourceModalProps) {
         <div className="mb-4 flex flex-wrap gap-2">
           <span className="tag">Chunk {item.chunk_index}</span>
           <span className="tag">Score {item.score.toFixed(4)}</span>
+          {item.block_kind ? <span className="tag">{item.block_kind}</span> : null}
           {item.page_number ? <span className="tag">Page {item.page_number}</span> : null}
         </div>
+
+        {item.section_path.length ? (
+          <div className="mb-4 text-xs uppercase tracking-[0.18em] text-zinc-500">{item.section_path.join(" > ")}</div>
+        ) : null}
 
         <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
           <pre className="whitespace-pre-wrap text-sm leading-7 text-zinc-200">{item.text || item.preview}</pre>

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import SearchResults from "@/components/SearchResults";
 import SourceModal from "@/components/SourceModal";
-import { SearchItem, semanticSearch } from "@/lib/api";
+import { SearchItem, SourceCatalogItem, getCatalog, semanticSearch } from "@/lib/api";
 import { useToast } from "@/components/ToastProvider";
 import { formatNumber } from "@/lib/format";
 
@@ -20,18 +20,50 @@ export default function SearchPage() {
   const [selected, setSelected] = useState<SearchItem | null>(null);
   const [topK, setTopK] = useState(5);
   const [lastSearchQuery, setLastSearchQuery] = useState("");
+  const [catalog, setCatalog] = useState<SourceCatalogItem[]>([]);
+  const [catalogFilter, setCatalogFilter] = useState("");
+  const [selectedSourceFiles, setSelectedSourceFiles] = useState<string[]>([]);
   const { pushToast } = useToast();
 
-  async function runSearch(nextQuery = query, nextTopK = topK) {
+  useEffect(() => {
+    async function loadCatalog() {
+      try {
+        const response = await getCatalog();
+        setCatalog(response.sources);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to load source catalog";
+        pushToast("error", message);
+      }
+    }
+
+    void loadCatalog();
+  }, [pushToast]);
+
+  const visibleCatalog = useMemo(() => {
+    const normalized = catalogFilter.trim().toLowerCase();
+    if (!normalized) return catalog;
+    return catalog.filter((item) => item.source_file.toLowerCase().includes(normalized));
+  }, [catalog, catalogFilter]);
+
+  function toggleSourceFile(sourceFile: string) {
+    setSelectedSourceFiles((current) =>
+      current.includes(sourceFile) ? current.filter((item) => item !== sourceFile) : [...current, sourceFile]
+    );
+  }
+
+  async function runSearch(nextQuery = query, nextTopK = topK, nextSourceFiles = selectedSourceFiles) {
     const trimmed = nextQuery.trim();
     if (!trimmed || loading) return;
     setLoading(true);
     try {
-      const response = await semanticSearch(trimmed, nextTopK);
+      const response = await semanticSearch(trimmed, {
+        topK: nextTopK,
+        sourceFiles: nextSourceFiles
+      });
       setResults(response.results);
       setLastSearchQuery(trimmed);
       if (!response.results.length) {
-        pushToast("info", "No similar chunks found");
+        pushToast("info", nextSourceFiles.length ? "No matching chunks found in the selected files" : "No similar chunks found");
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Search failed";
@@ -45,7 +77,7 @@ export default function SearchPage() {
     if (value === topK) return;
     setTopK(value);
     if (lastSearchQuery) {
-      void runSearch(lastSearchQuery, value);
+      void runSearch(lastSearchQuery, value, selectedSourceFiles);
     }
   }
 
@@ -58,7 +90,7 @@ export default function SearchPage() {
             Find the most relevant parts of your local data.
           </h2>
           <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-400 sm:text-base">
-            Run a semantic search, inspect the matching chunks, and open the source text before using it anywhere else.
+            Run a semantic search, optionally restrict it to specific files, and inspect the matching chunks before using them.
           </p>
 
           <div className="mt-6 flex flex-col gap-3 lg:flex-row">
@@ -84,7 +116,7 @@ export default function SearchPage() {
                 key={preset}
                 onClick={() => {
                   setQuery(preset);
-                  void runSearch(preset);
+                  void runSearch(preset, topK, selectedSourceFiles);
                 }}
                 className="tag transition hover:bg-white/[0.05]"
               >
@@ -123,10 +155,69 @@ export default function SearchPage() {
               <div className="mt-2 text-3xl font-display font-semibold text-white">{topK}</div>
             </div>
             <div className="metric-tile">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Scoped files</div>
+              <div className="mt-2 text-3xl font-display font-semibold text-white">{formatNumber(selectedSourceFiles.length)}</div>
+            </div>
+            <div className="metric-tile">
               <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Current results</div>
               <div className="mt-2 text-3xl font-display font-semibold text-white">{formatNumber(results.length)}</div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="shell-panel p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="eyebrow">Source scope</div>
+            <div className="mt-2 text-2xl font-semibold text-white">Search within selected files</div>
+          </div>
+          {selectedSourceFiles.length ? (
+            <button type="button" onClick={() => setSelectedSourceFiles([])} className="btn-secondary">
+              Clear scope
+            </button>
+          ) : null}
+        </div>
+
+        <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <input
+            value={catalogFilter}
+            onChange={(event) => setCatalogFilter(event.target.value)}
+            placeholder="Filter indexed files"
+            className="input-shell lg:max-w-[280px]"
+          />
+          <div className="text-xs uppercase tracking-[0.18em] text-zinc-500">
+            {selectedSourceFiles.length ? `${selectedSourceFiles.length} file${selectedSourceFiles.length === 1 ? "" : "s"} selected` : "Using all indexed files"}
+          </div>
+        </div>
+
+        <div className="mt-4 max-h-[280px] overflow-auto pr-1">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {visibleCatalog.map((item) => {
+              const selectedFile = selectedSourceFiles.includes(item.source_file);
+              return (
+                <button
+                  key={item.source_file}
+                  type="button"
+                  onClick={() => toggleSourceFile(item.source_file)}
+                  className={`rounded-[16px] border px-4 py-3 text-left transition ${
+                    selectedFile
+                      ? "border-sky-300/30 bg-sky-300/10"
+                      : "border-white/8 bg-white/[0.02] hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-sm font-medium text-white">{item.source_file}</div>
+                    <div className="tag">{item.kind}</div>
+                  </div>
+                  <div className="mt-2 text-xs text-zinc-400">
+                    {item.chunks} chunks{item.pages ? ` - ${item.pages} pages` : ""}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          {!visibleCatalog.length ? <div className="mt-2 text-sm text-zinc-500">No indexed files match this filter.</div> : null}
         </div>
       </section>
 
@@ -145,7 +236,12 @@ export default function SearchPage() {
                 {results.length ? `${results.length} result${results.length === 1 ? "" : "s"}` : "No results"}
               </div>
             </div>
-            {query.trim() ? <div className="tag">{query.trim()}</div> : null}
+            <div className="flex flex-wrap gap-2">
+              {query.trim() ? <div className="tag">{query.trim()}</div> : null}
+              {selectedSourceFiles.length ? (
+                <div className="tag">{selectedSourceFiles.length} scoped file{selectedSourceFiles.length === 1 ? "" : "s"}</div>
+              ) : null}
+            </div>
           </div>
           <SearchResults results={results} onOpenSource={setSelected} />
         </section>

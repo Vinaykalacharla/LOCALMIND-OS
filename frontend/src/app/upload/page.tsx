@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import UploadDropzone from "@/components/UploadDropzone";
-import { getStatus, ingestDemoData, ingestFiles, JobStatus } from "@/lib/api";
+import { getStats, getStatus, ingestDemoData, ingestFiles, JobStatus, StatsResponse, reindexKnowledgeBase } from "@/lib/api";
 import { useToast } from "@/components/ToastProvider";
 import { formatDateTime, formatNumber } from "@/lib/format";
 
@@ -18,8 +18,23 @@ export default function UploadPage() {
   const [files, setFiles] = useState<File[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
+  const [stats, setStats] = useState<StatsResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const { pushToast } = useToast();
+
+  useEffect(() => {
+    async function loadStats() {
+      try {
+        const response = await getStats();
+        setStats(response);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "Failed to load indexing stats";
+        pushToast("error", msg);
+      }
+    }
+
+    void loadStats();
+  }, [pushToast]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -31,6 +46,15 @@ export default function UploadPage() {
           clearInterval(timer);
           setBusy(false);
           pushToast(response.state === "done" ? "success" : "error", response.message || response.state);
+          if (response.state === "done") {
+            try {
+              const nextStats = await getStats();
+              setStats(nextStats);
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : "Failed to refresh indexing stats";
+              pushToast("error", msg);
+            }
+          }
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : "Failed to fetch job status";
@@ -88,6 +112,21 @@ export default function UploadPage() {
     }
   }
 
+  async function onReindex() {
+    if (busy) return;
+    setBusy(true);
+    setStatus(initialStatus);
+    try {
+      const response = await reindexKnowledgeBase();
+      setJobId(response.job_id);
+      pushToast("info", "Reindex started");
+    } catch (error) {
+      setBusy(false);
+      const msg = error instanceof Error ? error.message : "Reindex failed";
+      pushToast("error", msg);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_340px]">
@@ -104,6 +143,9 @@ export default function UploadPage() {
               Duplicate files are skipped when they were already indexed.
             </div>
             <div className="rounded-[16px] border border-white/8 bg-white/[0.02] px-4 py-4">
+              Reindex rebuilds existing data from the original files using the latest structure-aware chunker.
+            </div>
+            <div className="rounded-[16px] border border-white/8 bg-white/[0.02] px-4 py-4">
               If the vault is enabled, stored data remains encrypted at rest.
             </div>
           </div>
@@ -114,6 +156,9 @@ export default function UploadPage() {
             </button>
             <button onClick={onLoadDemo} disabled={busy} className="btn-secondary disabled:opacity-60">
               Load demo data
+            </button>
+            <button onClick={onReindex} disabled={busy || !stats?.indexed_files} className="btn-secondary disabled:opacity-60">
+              Rebuild existing index
             </button>
           </div>
         </div>
@@ -145,6 +190,13 @@ export default function UploadPage() {
             <div className="metric-tile">
               <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Status</div>
               <div className="mt-2 text-lg font-medium capitalize text-white">{status?.state ?? "idle"}</div>
+            </div>
+            <div className="metric-tile sm:col-span-3">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Chunking</div>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <div className="text-lg font-medium text-white">{stats?.chunking_version || "unknown"}</div>
+                {stats?.reindex_recommended ? <span className="status-pill warn">Reindex recommended</span> : <span className="status-pill">Current</span>}
+              </div>
             </div>
           </div>
 
@@ -210,10 +262,10 @@ export default function UploadPage() {
                 1. Extract readable text from files.
               </div>
               <div className="rounded-[14px] border border-white/8 bg-white/[0.02] px-4 py-3 text-sm text-zinc-300">
-                2. Create chunks and embeddings.
+                2. Preserve headings and list structure while chunking.
               </div>
               <div className="rounded-[14px] border border-white/8 bg-white/[0.02] px-4 py-3 text-sm text-zinc-300">
-                3. Refresh search and graph data.
+                3. Recompute embeddings, search, and graph data.
               </div>
             </div>
           </div>
