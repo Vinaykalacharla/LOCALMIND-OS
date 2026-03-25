@@ -64,6 +64,30 @@ class FakeVectorIndexLowConfidence:
         return [(0, -0.4)][:top_k]
 
 
+class FakeVectorIndexZeroSimilarity:
+    backend_name = "numpy-fallback"
+    size = 1
+
+    def search(self, _query_vector, top_k: int):
+        return [(0, 0.0)][:top_k]
+
+
+class FakeVectorIndexMissesExactCandidate:
+    backend_name = "numpy-fallback"
+    size = 1
+
+    def search(self, _query_vector, top_k: int):
+        return [(0, 0.73)][:top_k]
+
+
+class FakeVectorIndexMetadataPreference:
+    backend_name = "numpy-fallback"
+    size = 2
+
+    def search(self, _query_vector, top_k: int):
+        return [(0, 0.89), (1, 0.84)][:top_k]
+
+
 class DummySecurityManager:
     configured = False
     unlocked = False
@@ -90,10 +114,32 @@ class FakeRagEngine:
         return f"mode={answer_mode}"
 
 
+class QueryAwareEmbeddingService:
+    mode = "hashed-tfidf"
+    model_name = "hashed-tfidf-2048"
+
+    def embed_query(self, query: str):
+        return query
+
+
+class FakeVectorIndexQueryVariants:
+    backend_name = "numpy-fallback"
+    size = 2
+
+    def search(self, query_vector, _top_k: int):
+        lowered = str(query_vector).lower()
+        if "from my notes" in lowered:
+            return [(0, 0.72)]
+        if "tcp congestion control" in lowered:
+            return [(1, 0.88), (0, 0.61)]
+        return [(0, 0.5)]
+
+
 class MainBehaviorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_uploads_dir = main.UPLOADS_DIR
+        self.original_demo_data_dir = main.DEMO_DATA_DIR
         self.original_query_log_file = main.QUERY_LOG_FILE
         self.original_jobs = dict(main.jobs)
         self.original_chunks_store = list(main.chunks_store)
@@ -101,6 +147,9 @@ class MainBehaviorTests(unittest.TestCase):
         self.original_index_map = dict(main.index_map)
         self.original_meta = dict(main.meta)
         self.original_graph_cache = dict(main.graph_cache)
+        self.original_retrieval_stats = main.retrieval_stats
+        self.original_chunk_sequences = dict(main.chunk_sequences)
+        self.original_chunk_sequence_positions = dict(main.chunk_sequence_positions)
         self.original_prepare_index_state = main.prepare_index_state
         self.original_embedding_service = main.embedding_service
         self.original_vector_index = main.vector_index
@@ -113,6 +162,7 @@ class MainBehaviorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         main.UPLOADS_DIR = self.original_uploads_dir
+        main.DEMO_DATA_DIR = self.original_demo_data_dir
         main.QUERY_LOG_FILE = self.original_query_log_file
         main.jobs = self.original_jobs
         main.chunks_store = self.original_chunks_store
@@ -120,6 +170,9 @@ class MainBehaviorTests(unittest.TestCase):
         main.index_map = self.original_index_map
         main.meta = self.original_meta
         main.graph_cache = self.original_graph_cache
+        main.retrieval_stats = self.original_retrieval_stats
+        main.chunk_sequences = self.original_chunk_sequences
+        main.chunk_sequence_positions = self.original_chunk_sequence_positions
         main.prepare_index_state = self.original_prepare_index_state
         main.embedding_service = self.original_embedding_service
         main.vector_index = self.original_vector_index
@@ -231,6 +284,24 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertEqual(response["results"][0]["chunk_id"], "chunk_exact")
         self.assertGreaterEqual(response["results"][0]["score"], response["results"][1]["score"])
 
+    def test_search_filters_zero_similarity_results(self) -> None:
+        chunk = {
+            "chunk_id": "chunk_irrelevant",
+            "text": "TCP packets travel across the network.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 0,
+        }
+        main.chunks_store = [chunk]
+        main.chunk_by_id = {"chunk_irrelevant": chunk}
+        main.index_map = {"0": "chunk_irrelevant"}
+        main.embedding_service = FakeEmbeddingService()
+        main.vector_index = FakeVectorIndexZeroSimilarity()
+
+        response = main.search(main.SearchRequest(query="cross entropy", top_k=3))
+
+        self.assertEqual(response["results"], [])
+
     def test_search_can_be_scoped_to_selected_files(self) -> None:
         chunk_a = {
             "chunk_id": "chunk_a",
@@ -256,6 +327,121 @@ class MainBehaviorTests(unittest.TestCase):
 
         self.assertEqual(len(response["results"]), 1)
         self.assertEqual(response["results"][0]["chunk_id"], "chunk_a")
+
+    def test_search_uses_query_variants_for_better_matches(self) -> None:
+        chunk_generic = {
+            "chunk_id": "chunk_generic",
+            "text": "TCP uses packets and acknowledgements.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 0,
+        }
+        chunk_exact = {
+            "chunk_id": "chunk_exact",
+            "text": "TCP congestion control adjusts send rate to avoid overwhelming the network.",
+            "source_file": "network.txt",
+            "page_number": 2,
+            "chunk_index": 1,
+        }
+        main.chunks_store = [chunk_generic, chunk_exact]
+        main.chunk_by_id = {"chunk_generic": chunk_generic, "chunk_exact": chunk_exact}
+        main.index_map = {"0": "chunk_generic", "1": "chunk_exact"}
+        main.embedding_service = QueryAwareEmbeddingService()
+        main.vector_index = FakeVectorIndexQueryVariants()
+
+        response = main.search(main.SearchRequest(query="Explain TCP congestion control from my notes", top_k=2))
+
+        self.assertEqual(len(response["results"]), 2)
+        self.assertEqual(response["results"][0]["chunk_id"], "chunk_exact")
+
+    def test_search_can_recover_exact_match_from_lexical_candidates(self) -> None:
+        chunk_generic = {
+            "chunk_id": "chunk_generic",
+            "text": "TCP uses sequence numbers and acknowledgements for reliability.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 0,
+        }
+        chunk_exact = {
+            "chunk_id": "chunk_exact",
+            "text": "TCP congestion control adjusts send rate to avoid overwhelming the network.",
+            "source_file": "network.txt",
+            "page_number": 2,
+            "chunk_index": 1,
+        }
+        main.chunks_store = [chunk_generic, chunk_exact]
+        main.chunk_by_id = {"chunk_generic": chunk_generic, "chunk_exact": chunk_exact}
+        main.index_map = {"0": "chunk_generic", "1": "chunk_exact"}
+        main.refresh_memory_maps()
+        main.embedding_service = FakeEmbeddingService()
+        main.vector_index = FakeVectorIndexMissesExactCandidate()
+
+        response = main.search(main.SearchRequest(query="tcp congestion control", top_k=2))
+
+        self.assertEqual(len(response["results"]), 2)
+        self.assertEqual(response["results"][0]["chunk_id"], "chunk_exact")
+
+    def test_search_uses_source_file_metadata_for_reranking(self) -> None:
+        chunk_generic = {
+            "chunk_id": "chunk_generic",
+            "text": "Day 1 focus on foundations and timed practice.",
+            "source_file": "notes.txt",
+            "page_number": None,
+            "chunk_index": 0,
+            "section_path": [],
+            "block_kind": "paragraph",
+        }
+        chunk_file_match = {
+            "chunk_id": "chunk_file_match",
+            "text": "Day 1 focus on foundations and timed practice.",
+            "source_file": "revision_plan_ideas.txt",
+            "page_number": None,
+            "chunk_index": 0,
+            "section_path": [],
+            "block_kind": "paragraph",
+        }
+        main.chunks_store = [chunk_generic, chunk_file_match]
+        main.chunk_by_id = {"chunk_generic": chunk_generic, "chunk_file_match": chunk_file_match}
+        main.index_map = {"0": "chunk_generic", "1": "chunk_file_match"}
+        main.refresh_memory_maps()
+        main.embedding_service = FakeEmbeddingService()
+        main.vector_index = FakeVectorIndexMetadataPreference()
+
+        response = main.search(main.SearchRequest(query="revision plan ideas", top_k=2))
+
+        self.assertEqual(len(response["results"]), 2)
+        self.assertEqual(response["results"][0]["chunk_id"], "chunk_file_match")
+
+    def test_expand_answer_hits_includes_adjacent_chunks_for_context(self) -> None:
+        chunk_prev = {
+            "chunk_id": "chunk_prev",
+            "text": "TCP starts with slow start and uses a small congestion window.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 0,
+        }
+        chunk_center = {
+            "chunk_id": "chunk_center",
+            "text": "After the threshold, congestion avoidance grows the congestion window linearly.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 1,
+        }
+        chunk_next = {
+            "chunk_id": "chunk_next",
+            "text": "Packet loss triggers fast retransmit or timeout recovery depending on severity.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 2,
+        }
+        main.chunks_store = [chunk_prev, chunk_center, chunk_next]
+        main.refresh_memory_maps()
+
+        expanded = main._expand_answer_hits([dict(chunk_center, score=0.8, vector_score=0.8, preview="")])
+
+        self.assertEqual(len(expanded), 1)
+        self.assertIn("slow start", expanded[0]["text"])
+        self.assertIn("Packet loss triggers", expanded[0]["text"])
 
     def test_catalog_returns_source_summaries(self) -> None:
         main.chunks_store = [
@@ -314,6 +500,28 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertEqual(response["evidence_status"], "insufficient")
         self.assertEqual(fake_rag.calls, [])
 
+    def test_ask_uses_extractive_answer_for_limited_evidence_in_trust_mode(self) -> None:
+        chunk = {
+            "chunk_id": "chunk_a",
+            "text": "TCP congestion control adjusts the send rate to avoid overwhelming the network.",
+            "source_file": "network.txt",
+            "page_number": 1,
+            "chunk_index": 0,
+        }
+        fake_rag = FakeRagEngine()
+        main.chunks_store = [chunk]
+        main.chunk_by_id = {"chunk_a": chunk}
+        main.index_map = {"0": "chunk_a"}
+        main.embedding_service = FakeEmbeddingService()
+        main.vector_index = FakeVectorIndex()
+        main.rag_engine = fake_rag
+
+        response = main.ask(main.AskRequest(question="Explain TCP congestion control in detail", top_k=2, trust_mode=True))
+
+        self.assertIn("network.txt", response["answer"])
+        self.assertEqual(response["evidence_status"], "limited")
+        self.assertEqual(fake_rag.calls, [])
+
     def test_ask_passes_answer_mode_to_rag_engine(self) -> None:
         chunk = {
             "chunk_id": "chunk_a",
@@ -336,6 +544,13 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertEqual(response["answer_mode"], "flashcards")
         self.assertEqual(fake_rag.calls[0]["answer_mode"], "flashcards")
 
+    def test_retrieval_queries_add_keyword_variant(self) -> None:
+        queries = main._retrieval_queries("Explain TCP congestion control from my notes")
+
+        self.assertGreaterEqual(len(queries), 2)
+        self.assertEqual(queries[0], "Explain TCP congestion control from my notes")
+        self.assertTrue(any("tcp congestion control" in query.lower() for query in queries[1:]))
+
     def test_stats_include_feature_status(self) -> None:
         response = main.stats()
 
@@ -343,6 +558,48 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertTrue(response["feature_status"])
         self.assertIn("graph_mode", response)
         self.assertIn("pdf_backend", response)
+
+    def test_stats_reports_reindex_recommended_for_old_chunking_version(self) -> None:
+        main.chunks_store = [
+            {
+                "chunk_id": "chunk_a",
+                "text": "Alpha",
+                "source_file": "notes.txt",
+                "page_number": None,
+                "chunk_index": 0,
+            }
+        ]
+        main.meta = {"chunking_version": "legacy-v1"}
+
+        response = main.stats()
+
+        self.assertTrue(response["reindex_recommended"])
+        self.assertEqual(response["chunking_version"], "legacy-v1")
+
+    def test_collect_reindex_source_paths_uses_uploads_and_demo_data(self) -> None:
+        with tempfile.TemporaryDirectory() as upload_dir, tempfile.TemporaryDirectory() as demo_dir:
+            upload_path = Path(upload_dir) / "job-a" / "abc"
+            upload_path.mkdir(parents=True, exist_ok=True)
+            stored_upload = upload_path / "notes.txt"
+            stored_upload.write_text("stored upload", encoding="utf-8")
+
+            demo_path = Path(demo_dir) / "demo.md"
+            demo_path.write_text("demo file", encoding="utf-8")
+
+            main.UPLOADS_DIR = Path(upload_dir)
+            main.DEMO_DATA_DIR = Path(demo_dir)
+
+            paths, missing = main._collect_reindex_source_paths(
+                current_chunks=[
+                    {"source_file": "notes.txt"},
+                    {"source_file": "demo.md"},
+                    {"source_file": "missing.pdf"},
+                ],
+                current_meta={"indexed_files": ["notes.txt", "demo.md", "missing.pdf"]},
+            )
+
+        self.assertEqual({path.name for path in paths}, {"notes.txt", "demo.md"})
+        self.assertEqual(missing, ["missing.pdf"])
 
     def test_duplicate_source_file_is_skipped(self) -> None:
         chunk = {

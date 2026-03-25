@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -17,12 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from services.capabilities import build_feature_status, detect_pdf_backend
-from services.chunking import chunk_text
+from services.chunking import CHUNKING_VERSION, chunk_document
 from services.embeddings import EmbeddingService
 from services.graph import GraphBuilder
 from services.ingestion import extract_many
 from services.insights import build_insights
-from services.rag import RAGEngine
+from services.rag import RAGEngine, extractive_answer
 from services.security import SecurityError, SecurityManager
 from services.vector_index import VectorIndex
 
@@ -72,6 +73,31 @@ class SecurityPassphraseRequest(BaseModel):
     passphrase: str = Field(min_length=8, max_length=512)
 
 
+@dataclass
+class RetrievalStats:
+    doc_count: int
+    avg_doc_length: float
+    doc_freqs: Dict[str, int]
+    token_counts_by_chunk: Dict[str, Dict[str, int]]
+    doc_lengths_by_chunk: Dict[str, int]
+    source_tokens_by_chunk: Dict[str, List[str]]
+    section_tokens_by_chunk: Dict[str, List[str]]
+    block_kind_by_chunk: Dict[str, str]
+
+
+def _empty_retrieval_stats() -> RetrievalStats:
+    return RetrievalStats(
+        doc_count=0,
+        avg_doc_length=1.0,
+        doc_freqs={},
+        token_counts_by_chunk={},
+        doc_lengths_by_chunk={},
+        source_tokens_by_chunk={},
+        section_tokens_by_chunk={},
+        block_kind_by_chunk={},
+    )
+
+
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
 index_lock = threading.Lock()
@@ -82,6 +108,9 @@ chunk_by_id: Dict[str, Dict[str, Any]] = {}
 index_map: Dict[str, str] = {}
 meta: Dict[str, Any] = {}
 graph_cache: Dict[str, List[Dict[str, Any]]] = {"nodes": [], "edges": []}
+retrieval_stats = _empty_retrieval_stats()
+chunk_sequences: Dict[tuple[str, int | None], List[Dict[str, Any]]] = {}
+chunk_sequence_positions: Dict[str, int] = {}
 
 security_manager = SecurityManager(SECURITY_FILE)
 embedding_service = EmbeddingService()
@@ -136,12 +165,15 @@ def utc_now_iso() -> str:
 
 
 def reset_runtime_state(*, clear_jobs: bool = False) -> None:
-    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index
+    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index, retrieval_stats, chunk_sequences, chunk_sequence_positions
     chunks_store = []
     chunk_by_id = {}
     index_map = {}
     meta = {}
     graph_cache = {"nodes": [], "edges": []}
+    retrieval_stats = _empty_retrieval_stats()
+    chunk_sequences = {}
+    chunk_sequence_positions = {}
     vector_index = VectorIndex()
     if clear_jobs:
         with jobs_lock:
@@ -259,9 +291,85 @@ def update_job(job_id: str, **kwargs: Any) -> None:
         jobs[job_id] = job
 
 
+def _file_name_tokens(source_file: str) -> List[str]:
+    stem = Path(source_file).stem.replace("_", " ").replace("-", " ")
+    return _query_terms(stem)
+
+
+def _source_sequence_key(row: Dict[str, Any]) -> tuple[str, int | None]:
+    raw_page = row.get("page_number")
+    page_number = int(raw_page) if raw_page is not None else None
+    return (str(row.get("source_file") or "unknown"), page_number)
+
+
+def _build_retrieval_runtime(
+    rows: Sequence[Dict[str, Any]],
+) -> tuple[RetrievalStats, Dict[tuple[str, int | None], List[Dict[str, Any]]], Dict[str, int]]:
+    if not rows:
+        return _empty_retrieval_stats(), {}, {}
+
+    doc_freqs: Dict[str, int] = {}
+    token_counts_by_chunk: Dict[str, Dict[str, int]] = {}
+    doc_lengths_by_chunk: Dict[str, int] = {}
+    source_tokens_by_chunk: Dict[str, List[str]] = {}
+    section_tokens_by_chunk: Dict[str, List[str]] = {}
+    block_kind_by_chunk: Dict[str, str] = {}
+    grouped_sequences: Dict[tuple[str, int | None], List[Dict[str, Any]]] = {}
+    total_doc_length = 0
+
+    for row in rows:
+        chunk_id = str(row.get("chunk_id") or "")
+        terms = _query_terms(str(row.get("text", "")))
+        counts: Dict[str, int] = {}
+        for term in terms:
+            counts[term] = counts.get(term, 0) + 1
+
+        if chunk_id:
+            token_counts_by_chunk[chunk_id] = counts
+            doc_lengths_by_chunk[chunk_id] = sum(counts.values())
+            total_doc_length += doc_lengths_by_chunk[chunk_id]
+            source_tokens_by_chunk[chunk_id] = _file_name_tokens(str(row.get("source_file") or ""))
+            section_tokens: List[str] = []
+            for item in row.get("section_path") or []:
+                section_tokens.extend(_query_terms(str(item)))
+            section_tokens_by_chunk[chunk_id] = section_tokens
+            block_kind_by_chunk[chunk_id] = str(row.get("block_kind") or "")
+
+        for term in counts:
+            doc_freqs[term] = doc_freqs.get(term, 0) + 1
+
+        grouped_sequences.setdefault(_source_sequence_key(row), []).append(row)
+
+    sequence_positions: Dict[str, int] = {}
+    for key, items in grouped_sequences.items():
+        items.sort(key=lambda item: (int(item.get("chunk_index", 0)), str(item.get("chunk_id", ""))))
+        for index, item in enumerate(items):
+            chunk_id = str(item.get("chunk_id") or "")
+            if chunk_id:
+                sequence_positions[chunk_id] = index
+
+    doc_count = max(1, len(token_counts_by_chunk))
+    avg_doc_length = total_doc_length / doc_count if total_doc_length else 1.0
+    return (
+        RetrievalStats(
+            doc_count=len(token_counts_by_chunk),
+            avg_doc_length=avg_doc_length,
+            doc_freqs=doc_freqs,
+            token_counts_by_chunk=token_counts_by_chunk,
+            doc_lengths_by_chunk=doc_lengths_by_chunk,
+            source_tokens_by_chunk=source_tokens_by_chunk,
+            section_tokens_by_chunk=section_tokens_by_chunk,
+            block_kind_by_chunk=block_kind_by_chunk,
+        ),
+        grouped_sequences,
+        sequence_positions,
+    )
+
+
 def refresh_memory_maps() -> None:
-    global chunk_by_id
+    global chunk_by_id, retrieval_stats, chunk_sequences, chunk_sequence_positions
     chunk_by_id = {c["chunk_id"]: c for c in chunks_store if "chunk_id" in c}
+    retrieval_stats, chunk_sequences, chunk_sequence_positions = _build_retrieval_runtime(chunks_store)
 
 
 def build_index_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -279,8 +387,12 @@ def prepare_index_state(rows: List[Dict[str, Any]], previous_meta: Dict[str, Any
         {
             "indexed_files": sorted({c["source_file"] for c in rows}),
             "last_index_time": last_index_time,
+            "chunking_version": CHUNKING_VERSION,
             "embedding_model": emb_res.model_name,
             "embedding_mode": emb_res.mode,
+            "embedding_signature": embedding_service.index_signature(),
+            "embedding_dim": int(emb_res.vectors.shape[1]) if emb_res.vectors.ndim == 2 else 0,
+            "total_chunks": len(rows),
             "vector_backend": prepared_vector_index.backend_name,
         }
     )
@@ -296,7 +408,7 @@ def prepare_index_state(rows: List[Dict[str, Any]], previous_meta: Dict[str, Any
 
 
 def commit_prepared_state(prepared: PreparedIndexState) -> None:
-    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index
+    global chunks_store, index_map, meta, graph_cache, vector_index
 
     encrypt = security_manager.configured
     staged_chunks = _stage_bytes_file(CHUNKS_FILE, _serialize_chunks(prepared.chunks), encrypt=encrypt)
@@ -338,12 +450,12 @@ def commit_prepared_state(prepared: PreparedIndexState) -> None:
                 staged.unlink(missing_ok=True)
 
     chunks_store = prepared.chunks
-    chunk_by_id = prepared.chunk_by_id
     index_map = prepared.index_map
     meta = prepared.meta
     graph_cache = prepared.graph_cache
     vector_index = prepared.vector_index
     vector_index.index_path = INDEX_FILE
+    refresh_memory_maps()
 
 
 def rebuild_all_indices(*, last_index_time: str) -> None:
@@ -394,13 +506,57 @@ def encrypt_existing_artifacts() -> None:
                 staged.unlink(missing_ok=True)
 
 
+def _prepare_runtime_embeddings(rows: Sequence[Dict[str, Any]]) -> None:
+    texts = [str(row.get("text", "")) for row in rows if str(row.get("text", "")).strip()]
+    embedding_service.prepare_runtime(texts)
+
+
+def _persisted_index_needs_rebuild(
+    rows: Sequence[Dict[str, Any]],
+    current_meta: Dict[str, Any],
+    current_vector_index: VectorIndex,
+) -> bool:
+    if not rows:
+        return False
+
+    if current_vector_index.size != len(rows):
+        return True
+
+    stored_signature = str(current_meta.get("embedding_signature") or "").strip()
+    current_signature = embedding_service.index_signature()
+    if not stored_signature:
+        return True
+    if stored_signature != current_signature:
+        return True
+
+    stored_chunks = int(current_meta.get("total_chunks") or len(rows))
+    return stored_chunks != len(rows)
+
+
 def load_persisted_state() -> None:
     global chunks_store, index_map, meta, graph_cache, vector_index
-    chunks_store = load_chunks()
-    index_map = _load_json_artifact(INDEX_MAP_FILE, {})
-    meta = _load_json_artifact(META_FILE, {})
-    graph_cache = _load_json_artifact(GRAPH_FILE, {"nodes": [], "edges": []})
-    vector_index = load_vector_index()
+    loaded_chunks = load_chunks()
+    loaded_index_map = _load_json_artifact(INDEX_MAP_FILE, {})
+    loaded_meta = _load_json_artifact(META_FILE, {})
+    loaded_graph_cache = _load_json_artifact(GRAPH_FILE, {"nodes": [], "edges": []})
+    loaded_vector_index = load_vector_index()
+
+    _prepare_runtime_embeddings(loaded_chunks)
+
+    if _persisted_index_needs_rebuild(loaded_chunks, loaded_meta, loaded_vector_index):
+        prepared = prepare_index_state(
+            list(loaded_chunks),
+            loaded_meta,
+            last_index_time=str(loaded_meta.get("last_index_time") or utc_now_iso()),
+        )
+        commit_prepared_state(prepared)
+        return
+
+    chunks_store = loaded_chunks
+    index_map = loaded_index_map
+    meta = loaded_meta
+    graph_cache = loaded_graph_cache
+    vector_index = loaded_vector_index
     refresh_memory_maps()
 
 
@@ -425,6 +581,62 @@ def materialize_input_paths(file_paths: List[Path]) -> Iterator[List[Path]]:
         yield materialized
 
 
+def _build_chunks_from_docs(docs: Sequence[Any]) -> List[Dict[str, Any]]:
+    new_chunks: List[Dict[str, Any]] = []
+    for doc in docs:
+        pieces = chunk_document(doc.text, chunk_size=900, overlap=150)
+        for idx, piece in enumerate(pieces):
+            new_chunks.append(
+                {
+                    "chunk_id": f"chunk_{uuid.uuid4().hex[:12]}",
+                    "text": piece.text,
+                    "source_file": doc.source_file,
+                    "source_id": getattr(doc, "source_id", None),
+                    "page_number": doc.page_number,
+                    "chunk_index": idx,
+                    "section_path": piece.section_path,
+                    "block_kind": piece.block_kind,
+                    "created_at": utc_now_iso(),
+                }
+            )
+    return new_chunks
+
+
+def _indexed_source_names(current_chunks: Sequence[Dict[str, Any]], current_meta: Dict[str, Any]) -> set[str]:
+    names = {str(row.get("source_file") or "").strip() for row in current_chunks if str(row.get("source_file") or "").strip()}
+    names.update(str(name).strip() for name in current_meta.get("indexed_files", []) if str(name).strip())
+    return names
+
+
+def _collect_reindex_source_paths(current_chunks: Sequence[Dict[str, Any]], current_meta: Dict[str, Any]) -> tuple[List[Path], List[str]]:
+    indexed_names = _indexed_source_names(current_chunks, current_meta)
+
+    upload_paths = sorted(p for p in UPLOADS_DIR.rglob("*") if p.is_file())
+    selected_paths: List[Path] = list(upload_paths)
+    seen_locations = {str(path.resolve()) for path in selected_paths}
+
+    demo_lookup = {p.name: p for p in DEMO_DATA_DIR.glob("*") if p.is_file()}
+    for name in sorted(indexed_names):
+        demo_path = demo_lookup.get(name)
+        if demo_path is None:
+            continue
+        resolved = str(demo_path.resolve())
+        if resolved in seen_locations:
+            continue
+        selected_paths.append(demo_path)
+        seen_locations.add(resolved)
+
+    available_names = {path.name for path in selected_paths}
+    missing_names = sorted(name for name in indexed_names if name not in available_names)
+    return selected_paths, missing_names
+
+
+def _reindex_recommended(current_chunks: Sequence[Dict[str, Any]], current_meta: Dict[str, Any]) -> bool:
+    if not current_chunks:
+        return False
+    return str(current_meta.get("chunking_version") or "") != CHUNKING_VERSION
+
+
 def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
     try:
         update_job(job_id, state="processing", step="extracting", progress=10, message="Extracting text")
@@ -436,7 +648,6 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
 
         update_job(job_id, state="processing", step="chunking", progress=35, message="Creating chunks")
         skipped_files: List[str] = []
-        new_chunks: List[Dict[str, Any]] = []
         with index_lock:
             docs, skipped_files = filter_new_documents(docs, chunks_store)
             if not docs:
@@ -449,20 +660,7 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
                 )
                 return
 
-            for doc in docs:
-                pieces = chunk_text(doc.text, chunk_size=900, overlap=150)
-                for idx, piece in enumerate(pieces):
-                    new_chunks.append(
-                        {
-                            "chunk_id": f"chunk_{uuid.uuid4().hex[:12]}",
-                            "text": piece,
-                            "source_file": doc.source_file,
-                            "source_id": getattr(doc, "source_id", None),
-                            "page_number": doc.page_number,
-                            "chunk_index": idx,
-                            "created_at": utc_now_iso(),
-                        }
-                    )
+            new_chunks = _build_chunks_from_docs(docs)
 
             if not new_chunks:
                 update_job(job_id, state="error", step="chunking", progress=100, message="No chunks created")
@@ -480,6 +678,51 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
         message = f"Indexed {len(new_chunks)} chunks"
         if skipped_files:
             message += f" ({len(skipped_files)} file(s) already indexed)"
+        update_job(job_id, state="done", step="completed", progress=100, message=message)
+    except Exception as exc:
+        update_job(job_id, state="error", step="failed", progress=100, message=str(exc))
+
+
+def process_reindex(job_id: str) -> None:
+    try:
+        update_job(job_id, state="processing", step="collecting", progress=8, message="Collecting original source files")
+        with index_lock:
+            current_chunks = list(chunks_store)
+            current_meta = dict(meta)
+        source_paths, missing_names = _collect_reindex_source_paths(current_chunks, current_meta)
+        if not source_paths:
+            detail = "No original files were found for reindexing"
+            if missing_names:
+                detail += f" ({len(missing_names)} missing source files)"
+            update_job(job_id, state="error", step="collecting", progress=100, message=detail)
+            return
+
+        update_job(job_id, state="processing", step="extracting", progress=24, message="Re-extracting original files")
+        with materialize_input_paths(source_paths) as readable_paths:
+            docs = extract_many(readable_paths)
+        if not docs:
+            update_job(job_id, state="error", step="extracting", progress=100, message="No readable text found during reindex")
+            return
+
+        update_job(job_id, state="processing", step="chunking", progress=48, message="Rebuilding structure-aware chunks")
+        rebuilt_chunks = _build_chunks_from_docs(docs)
+        if not rebuilt_chunks:
+            update_job(job_id, state="error", step="chunking", progress=100, message="No chunks created during reindex")
+            return
+
+        update_job(job_id, state="processing", step="embedding", progress=72, message="Recomputing embeddings")
+        with index_lock:
+            prepared = prepare_index_state(
+                rebuilt_chunks,
+                current_meta,
+                last_index_time=utc_now_iso(),
+            )
+            commit_prepared_state(prepared)
+
+        update_job(job_id, state="processing", step="graph", progress=92, message="Refreshing graph and retrieval state")
+        message = f"Reindexed {len(rebuilt_chunks)} chunks from {len(source_paths)} source file(s)"
+        if missing_names:
+            message += f" ({len(missing_names)} missing source file(s) could not be rebuilt)"
         update_job(job_id, state="done", step="completed", progress=100, message=message)
     except Exception as exc:
         update_job(job_id, state="error", step="failed", progress=100, message=str(exc))
@@ -597,6 +840,14 @@ def ingest_demo(background_tasks: BackgroundTasks) -> Dict[str, str]:
     return {"job_id": job_id}
 
 
+@app.post("/reindex")
+def reindex(background_tasks: BackgroundTasks) -> Dict[str, str]:
+    ensure_unlocked()
+    job_id = create_job()
+    background_tasks.add_task(process_reindex, job_id)
+    return {"job_id": job_id}
+
+
 @app.get("/status")
 def status(job_id: str) -> Dict[str, Any]:
     ensure_unlocked()
@@ -619,6 +870,8 @@ def stats() -> Dict[str, Any]:
         "total_chunks": len(current_chunks),
         "graph_nodes": len(current_graph.get("nodes", [])),
         "last_index_time": current_meta.get("last_index_time", ""),
+        "chunking_version": current_meta.get("chunking_version", ""),
+        "reindex_recommended": _reindex_recommended(current_chunks, current_meta),
         "embedding_model": current_meta.get("embedding_model", embedding_service.model_name),
         "embedding_mode": embedding_service.mode,
         "vector_backend": current_vector_index.backend_name,
@@ -657,6 +910,34 @@ def _tokenize_query_text(text: str) -> List[str]:
 
 def _query_terms(text: str) -> List[str]:
     return [token for token in _tokenize_query_text(text) if token not in SEARCH_STOPWORDS and len(token) > 2]
+
+
+def _retrieval_queries(text: str) -> List[str]:
+    normalized = text.strip()
+    if not normalized:
+        return []
+
+    variants = [normalized]
+    terms = _query_terms(normalized)
+    if terms:
+        keyword_query = " ".join(terms[:8])
+        if keyword_query and keyword_query.lower() != normalized.lower():
+            variants.append(keyword_query)
+
+        if len(terms) >= 3:
+            focused_query = " ".join(terms[:5])
+            if focused_query and focused_query.lower() not in {item.lower() for item in variants}:
+                variants.append(focused_query)
+
+    unique: List[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        lowered = item.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        unique.append(item)
+    return unique
 
 
 def _normalized_source_scope(source_files: Sequence[str] | None) -> List[str]:
@@ -809,15 +1090,104 @@ def _insufficient_evidence_answer(question: str, sources: Sequence[Dict[str, Any
     return "\n".join(lines)
 
 
-def _hybrid_relevance_score(query: str, text: str, vector_score: float) -> float:
-    semantic_score = max(0.0, min(1.0, (float(vector_score) + 1.0) / 2.0))
+def _semantic_score(vector_score: float) -> float:
+    score = float(vector_score)
+    if score < 0.0:
+        score = (score + 1.0) / 2.0
+    return max(0.0, min(1.0, score))
+
+
+def _retrieval_intent(text: str) -> str:
+    lowered = text.lower()
+    if any(token in lowered for token in ["compare", "difference", "different", "vs", "versus"]):
+        return "compare"
+    if any(token in lowered for token in ["plan", "roadmap", "schedule", "revise", "revision"]):
+        return "plan"
+    if any(token in lowered for token in ["list", "steps", "points", "bullets"]):
+        return "list"
+    return "answer"
+
+
+def _metadata_match_score(query_terms: Sequence[str], chunk_id: str | None, intent: str) -> float:
+    if not chunk_id or not query_terms:
+        return 0.0
+
+    query_term_set = set(query_terms)
+    source_tokens = set(retrieval_stats.source_tokens_by_chunk.get(chunk_id, []))
+    section_tokens = set(retrieval_stats.section_tokens_by_chunk.get(chunk_id, []))
+    block_kind = retrieval_stats.block_kind_by_chunk.get(chunk_id, "")
+
+    source_overlap = len(query_term_set & source_tokens) / max(1, len(query_term_set))
+    section_overlap = len(query_term_set & section_tokens) / max(1, len(query_term_set))
+
+    intent_bonus = 0.0
+    if intent in {"list", "plan"} and block_kind == "list":
+        intent_bonus += 0.14
+    if intent == "compare" and any(token in section_tokens or token in source_tokens for token in {"compare", "comparison", "difference", "versus", "vs"}):
+        intent_bonus += 0.12
+
+    return round(min(1.0, (source_overlap * 0.45) + (section_overlap * 0.55) + intent_bonus), 4)
+
+
+def _normalized_lexical_score(raw_score: float, query_term_count: int) -> float:
+    if raw_score <= 0.0:
+        return 0.0
+    scale = max(1.2, query_term_count * 0.85)
+    return round(min(1.0, raw_score / (raw_score + scale)), 4)
+
+
+def _raw_bm25_score(query_terms: Sequence[str], text: str, *, chunk_id: str | None = None) -> float:
+    if not query_terms or retrieval_stats.doc_count <= 0:
+        return 0.0
+
+    counts = retrieval_stats.token_counts_by_chunk.get(chunk_id or "")
+    if counts is None:
+        counts = {}
+        for term in _query_terms(text):
+            counts[term] = counts.get(term, 0) + 1
+
+    doc_length = retrieval_stats.doc_lengths_by_chunk.get(chunk_id or "", sum(counts.values()))
+    if doc_length <= 0:
+        return 0.0
+
+    k1 = 1.5
+    b = 0.75
+    avg_doc_length = max(1.0, retrieval_stats.avg_doc_length)
+    score = 0.0
+    for term in dict.fromkeys(query_terms):
+        freq = counts.get(term, 0)
+        if freq <= 0:
+            continue
+        df = retrieval_stats.doc_freqs.get(term, 0)
+        idf = math.log(1.0 + ((retrieval_stats.doc_count - df + 0.5) / (df + 0.5)))
+        denom = freq + (k1 * (1.0 - b + (b * (doc_length / avg_doc_length))))
+        score += idf * (((k1 + 1.0) * freq) / denom)
+    return round(score, 4)
+
+
+def _relevance_signals(query: str, text: str, vector_score: float, *, chunk_id: str | None = None) -> Dict[str, float]:
+    semantic_score = _semantic_score(vector_score)
     query_terms = _query_terms(query)
+    intent = _retrieval_intent(query)
+    lexical_score = _normalized_lexical_score(_raw_bm25_score(query_terms, text, chunk_id=chunk_id), len(query_terms))
+    metadata_score = _metadata_match_score(query_terms, chunk_id, intent)
+    base_signals = {
+        "score": round(semantic_score, 4),
+        "semantic_score": round(semantic_score, 4),
+        "lexical_score": lexical_score,
+        "metadata_score": metadata_score,
+        "coverage": 0.0,
+        "bigram_score": 0.0,
+        "phrase_match": 0.0,
+        "lead_match": 0.0,
+        "query_term_count": float(len(query_terms)),
+    }
     if not query_terms:
-        return round(semantic_score, 4)
+        return base_signals
 
     text_tokens = _tokenize_query_text(text)
     if not text_tokens:
-        return round(semantic_score, 4)
+        return base_signals
 
     text_token_set = set(text_tokens)
     query_term_set = set(query_terms)
@@ -832,13 +1202,200 @@ def _hybrid_relevance_score(query: str, text: str, vector_score: float) -> float
 
     normalized_query = " ".join(query_terms)
     normalized_text = " ".join(text_tokens)
-    phrase_bonus = 0.18 if len(query_terms) >= 2 and normalized_query in normalized_text else 0.0
+    phrase_match = 1.0 if len(query_terms) >= 2 and normalized_query in normalized_text else 0.0
 
     lead_window = " ".join(text_tokens[: min(28, len(text_tokens))])
-    lead_bonus = 0.05 if any(term in lead_window for term in query_term_set) else 0.0
+    lead_match = 1.0 if any(term in lead_window for term in query_term_set) else 0.0
 
-    blended = (semantic_score * 0.52) + (coverage * 0.28) + (bigram_score * 0.15) + phrase_bonus + lead_bonus
-    return round(min(1.0, blended), 4)
+    blended = (
+        (semantic_score * 0.34)
+        + (lexical_score * 0.23)
+        + (metadata_score * 0.12)
+        + (coverage * 0.17)
+        + (bigram_score * 0.10)
+        + (phrase_match * 0.03)
+        + (lead_match * 0.01)
+    )
+    return {
+        "score": round(min(1.0, blended), 4),
+        "semantic_score": round(semantic_score, 4),
+        "lexical_score": lexical_score,
+        "metadata_score": metadata_score,
+        "coverage": round(coverage, 4),
+        "bigram_score": round(bigram_score, 4),
+        "phrase_match": phrase_match,
+        "lead_match": lead_match,
+        "query_term_count": float(len(query_terms)),
+    }
+
+
+def _passes_relevance_threshold(query: str, text: str, vector_score: float, *, chunk_id: str | None = None) -> bool:
+    signals = _relevance_signals(query, text, vector_score, chunk_id=chunk_id)
+    query_term_count = int(signals["query_term_count"])
+    score = float(signals["score"])
+    if query_term_count == 0:
+        return score >= 0.12
+
+    if (
+        float(signals["lexical_score"]) > 0.0
+        or float(signals["metadata_score"]) > 0.0
+        or signals["coverage"] > 0.0
+        or signals["bigram_score"] > 0.0
+        or signals["phrase_match"] > 0.0
+    ):
+        return score >= 0.16
+
+    return float(signals["semantic_score"]) >= 0.86 and score >= 0.26
+
+
+def _hybrid_relevance_score(query: str, text: str, vector_score: float, *, chunk_id: str | None = None) -> float:
+    return float(_relevance_signals(query, text, vector_score, chunk_id=chunk_id)["score"])
+
+
+def _candidate_preview(text: str) -> str:
+    return text[:220] + ("..." if len(text) > 220 else "")
+
+
+def _lexical_candidate_rows(
+    query: str,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    source_scope: set[str],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    query_terms = _query_terms(query)
+    if not query_terms:
+        return []
+
+    lexical_candidates: List[Dict[str, Any]] = []
+    seen_chunk_ids: set[str] = set()
+    for row in rows:
+        if source_scope and str(row.get("source_file") or "") not in source_scope:
+            continue
+
+        chunk_id = str(row.get("chunk_id") or "")
+        if not chunk_id or chunk_id in seen_chunk_ids:
+            continue
+
+        text = str(row.get("text") or "")
+        raw_score = _raw_bm25_score(query_terms, text, chunk_id=chunk_id)
+        if raw_score <= 0.0:
+            continue
+
+        seen_chunk_ids.add(chunk_id)
+        lexical_candidates.append(
+            {
+                "chunk_id": chunk_id,
+                "raw_lexical_score": raw_score,
+                "source_file": row.get("source_file"),
+                "page_number": row.get("page_number"),
+                "chunk_index": row.get("chunk_index", 0),
+                "text": text,
+            }
+        )
+
+    lexical_candidates.sort(key=lambda row: float(row["raw_lexical_score"]), reverse=True)
+    return lexical_candidates[:top_k]
+
+
+def _candidate_diversity_adjustment(candidate: Dict[str, Any], selected: Sequence[Dict[str, Any]]) -> float:
+    if len(selected) < 2:
+        return 0.0
+
+    candidate_tokens = set(_query_terms(str(candidate.get("text", "")))) or set(
+        _tokenize_query_text(str(candidate.get("text", "")))[:80]
+    )
+    novelty_bonus = 0.0
+    if candidate_tokens:
+        max_overlap = 0.0
+        for row in selected:
+            selected_tokens = set(_query_terms(str(row.get("text", "")))) or set(
+                _tokenize_query_text(str(row.get("text", "")))[:80]
+            )
+            if not selected_tokens:
+                continue
+            overlap = len(candidate_tokens & selected_tokens) / max(1, len(candidate_tokens | selected_tokens))
+            max_overlap = max(max_overlap, overlap)
+        novelty_bonus = max(0.0, 1.0 - max_overlap) * 0.05
+
+    adjacency_penalty = 0.0
+    for row in selected:
+        same_source = str(row.get("source_file") or "") == str(candidate.get("source_file") or "")
+        same_page = row.get("page_number") == candidate.get("page_number")
+        chunk_gap = abs(int(row.get("chunk_index", 0)) - int(candidate.get("chunk_index", 0)))
+        if same_source and same_page and chunk_gap <= 1:
+            adjacency_penalty = max(adjacency_penalty, 0.04)
+        elif same_source:
+            adjacency_penalty = max(adjacency_penalty, 0.01)
+    return round(novelty_bonus - adjacency_penalty, 4)
+
+
+def _select_diverse_results(candidates: Sequence[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    pool = [dict(candidate) for candidate in candidates]
+    selected: List[Dict[str, Any]] = []
+    while pool and len(selected) < top_k:
+        best_index = 0
+        best_value = float("-inf")
+        for index, candidate in enumerate(pool):
+            value = float(candidate.get("score", 0.0)) + _candidate_diversity_adjustment(candidate, selected)
+            if value > best_value:
+                best_value = value
+                best_index = index
+        selected.append(pool.pop(best_index))
+    return selected
+
+
+def _expanded_chunk_text(hit: Dict[str, Any], *, max_neighbors: int = 1, max_chars: int = 1600) -> str:
+    chunk_id = str(hit.get("chunk_id") or "")
+    sequence_key = _source_sequence_key(hit)
+    sequence = chunk_sequences.get(sequence_key)
+    center_position = chunk_sequence_positions.get(chunk_id)
+    if not sequence or center_position is None:
+        return str(hit.get("text", ""))
+
+    chosen_positions = {center_position}
+    total_chars = len(str(sequence[center_position].get("text", "")))
+    for offset in range(1, max_neighbors + 1):
+        for next_position in (center_position - offset, center_position + offset):
+            if not (0 <= next_position < len(sequence)):
+                continue
+            candidate = sequence[next_position]
+            candidate_text = str(candidate.get("text", "")).strip()
+            if not candidate_text:
+                continue
+            if total_chars + len(candidate_text) > max_chars:
+                continue
+            chosen_positions.add(next_position)
+            total_chars += len(candidate_text)
+
+    parts: List[str] = []
+    seen_parts: set[str] = set()
+    for position in sorted(chosen_positions):
+        chunk_text_value = str(sequence[position].get("text", "")).strip()
+        if not chunk_text_value or chunk_text_value in seen_parts:
+            continue
+        seen_parts.add(chunk_text_value)
+        parts.append(chunk_text_value)
+    return "\n".join(parts) if parts else str(hit.get("text", ""))
+
+
+def _expand_answer_hits(hits: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    expanded: List[Dict[str, Any]] = []
+    for hit in hits:
+        row = dict(hit)
+        row["text"] = _expanded_chunk_text(row)
+        row["preview"] = _candidate_preview(str(row["text"]))
+        expanded.append(row)
+    return expanded
+
+
+def _rrf_bonus(*ranks: int | None, k: int = 60) -> float:
+    total = 0.0
+    for rank in ranks:
+        if rank is None or rank < 1:
+            continue
+        total += 1.0 / (k + rank)
+    return round(total, 6)
 
 
 def _answer_context_limit(top_k: int) -> int:
@@ -860,8 +1417,9 @@ def _search_internal(query: str, top_k: int, source_files: Sequence[str] | None 
     max_candidates = max(len(current_chunks), getattr(current_vector_index, "size", len(current_chunks)))
     candidate_k = max_candidates if source_scope else min(max_candidates, max(12, top_k * 5))
     hits = current_vector_index.search(q_vec, candidate_k)
-    candidates: List[Dict[str, Any]] = []
-    for row_id, score in hits:
+
+    merged_candidates: Dict[str, Dict[str, Any]] = {}
+    for semantic_rank, (row_id, score) in enumerate(hits, start=1):
         chunk_id = current_index_map.get(str(row_id))
         if not chunk_id:
             if 0 <= row_id < len(current_chunks):
@@ -878,33 +1436,99 @@ def _search_internal(query: str, top_k: int, source_files: Sequence[str] | None 
 
         resolved_chunk_id = str(chunk.get("chunk_id") or chunk_id or f"row_{row_id}")
         text = chunk.get("text", "")
-        preview = text[:220] + ("..." if len(text) > 220 else "")
-        candidates.append(
-            {
-                "chunk_id": resolved_chunk_id,
-                "score": _hybrid_relevance_score(query, text, float(score)),
-                "vector_score": round(float(score), 4),
-                "preview": preview,
-                "source_file": chunk.get("source_file"),
-                "page_number": chunk.get("page_number"),
-                "chunk_index": chunk.get("chunk_index", 0),
-                "text": text,
-            }
-        )
-
-    candidates.sort(key=lambda row: (float(row["score"]), float(row.get("vector_score", 0.0))), reverse=True)
-
-    out: List[Dict[str, Any]] = []
-    seen_chunk_ids: set[str] = set()
-    for candidate in candidates:
-        chunk_id = str(candidate["chunk_id"])
-        if chunk_id in seen_chunk_ids:
+        if not _passes_relevance_threshold(query, text, float(score), chunk_id=resolved_chunk_id):
             continue
-        seen_chunk_ids.add(chunk_id)
-        out.append(candidate)
-        if len(out) >= top_k:
-            break
-    return out
+        merged_candidates[resolved_chunk_id] = {
+            "chunk_id": resolved_chunk_id,
+            "score": _hybrid_relevance_score(query, text, float(score), chunk_id=resolved_chunk_id),
+            "vector_score": round(float(score), 4),
+            "preview": _candidate_preview(text),
+            "source_file": chunk.get("source_file"),
+            "page_number": chunk.get("page_number"),
+            "chunk_index": chunk.get("chunk_index", 0),
+            "section_path": chunk.get("section_path", []),
+            "block_kind": chunk.get("block_kind", ""),
+            "text": text,
+            "semantic_rank": semantic_rank,
+        }
+
+    lexical_limit = max(top_k * 6, 18)
+    for lexical_rank, lexical_row in enumerate(
+        _lexical_candidate_rows(query, current_chunks, source_scope=source_scope, top_k=lexical_limit),
+        start=1,
+    ):
+        resolved_chunk_id = str(lexical_row["chunk_id"])
+        text = str(lexical_row["text"])
+        vector_score = float(merged_candidates.get(resolved_chunk_id, {}).get("vector_score", 0.0))
+        if not _passes_relevance_threshold(query, text, vector_score, chunk_id=resolved_chunk_id):
+            continue
+
+        score = _hybrid_relevance_score(query, text, vector_score, chunk_id=resolved_chunk_id)
+        existing = merged_candidates.get(resolved_chunk_id)
+        if existing is None or score > float(existing.get("score", 0.0)):
+            merged_candidates[resolved_chunk_id] = {
+                "chunk_id": resolved_chunk_id,
+                "score": score,
+                "vector_score": round(vector_score, 4),
+                "preview": _candidate_preview(text),
+                "source_file": lexical_row.get("source_file"),
+                "page_number": lexical_row.get("page_number"),
+                "chunk_index": lexical_row.get("chunk_index", 0),
+                "section_path": current_chunk_by_id.get(resolved_chunk_id, {}).get("section_path", []),
+                "block_kind": current_chunk_by_id.get(resolved_chunk_id, {}).get("block_kind", ""),
+                "text": text,
+                "semantic_rank": existing.get("semantic_rank") if existing else None,
+                "lexical_rank": lexical_rank,
+            }
+        elif existing is not None:
+            existing["lexical_rank"] = lexical_rank
+
+    for candidate in merged_candidates.values():
+        fusion_bonus = _rrf_bonus(candidate.get("semantic_rank"), candidate.get("lexical_rank"))
+        candidate["score"] = round(min(1.0, float(candidate["score"]) + (fusion_bonus * 2.5)), 4)
+
+    candidates = sorted(
+        merged_candidates.values(),
+        key=lambda row: (float(row["score"]), float(row.get("vector_score", 0.0))),
+        reverse=True,
+    )
+    return _select_diverse_results(candidates, top_k)
+
+
+def _search_for_answer(question: str, top_k: int, source_files: Sequence[str] | None = None) -> List[Dict[str, Any]]:
+    variants = _retrieval_queries(question)
+    if not variants:
+        return []
+
+    per_query_limit = max(top_k, min(12, top_k + 4))
+    merged: Dict[str, Dict[str, Any]] = {}
+    variant_hits: Dict[str, int] = {}
+
+    for variant in variants:
+        results = _search_internal(variant, per_query_limit, source_files=source_files)
+        for row in results:
+            chunk_id = str(row["chunk_id"])
+            refreshed = dict(row)
+            refreshed["score"] = _hybrid_relevance_score(
+                question,
+                str(row.get("text", "")),
+                float(row.get("vector_score", row["score"])),
+                chunk_id=chunk_id,
+            )
+            existing = merged.get(chunk_id)
+            if existing is None or float(refreshed["score"]) > float(existing["score"]):
+                merged[chunk_id] = refreshed
+            variant_hits[chunk_id] = variant_hits.get(chunk_id, 0) + 1
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda row: (
+            float(row["score"]) + max(0, variant_hits.get(str(row["chunk_id"]), 1) - 1) * 0.05,
+            float(row.get("vector_score", row["score"])),
+        ),
+        reverse=True,
+    )
+    return _select_diverse_results(ranked, top_k)
 
 
 @app.post("/search")
@@ -914,7 +1538,7 @@ def search(payload: SearchRequest) -> Dict[str, Any]:
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     append_query_log("search", query)
-    results = _search_internal(query=query, top_k=payload.top_k, source_files=payload.source_files)
+    results = _search_for_answer(question=query, top_k=payload.top_k, source_files=payload.source_files)
     return {
         "results": [
             {
@@ -925,6 +1549,8 @@ def search(payload: SearchRequest) -> Dict[str, Any]:
                 "source_file": r["source_file"],
                 "page_number": r["page_number"],
                 "chunk_index": r["chunk_index"],
+                "section_path": r.get("section_path", []),
+                "block_kind": r.get("block_kind", ""),
             }
             for r in results
         ]
@@ -940,8 +1566,8 @@ def ask(payload: AskRequest) -> Dict[str, Any]:
     answer_mode = _normalize_answer_mode(payload.mode)
     source_scope = _normalized_source_scope(payload.source_files)
     append_query_log("ask", question)
-    hits = _search_internal(question, _answer_context_limit(payload.top_k), source_files=source_scope)
-    answer_hits = hits[: _answer_context_limit(payload.top_k)]
+    hits = _search_for_answer(question, _answer_context_limit(payload.top_k), source_files=source_scope)
+    answer_hits = _expand_answer_hits(hits[: _answer_context_limit(payload.top_k)])
     assessment = _assess_evidence(question, answer_hits, source_scope)
     sources = [
         {
@@ -952,11 +1578,15 @@ def ask(payload: AskRequest) -> Dict[str, Any]:
             "text": r["text"],
             "source_file": r["source_file"],
             "page_number": r["page_number"],
+            "section_path": r.get("section_path", []),
+            "block_kind": r.get("block_kind", ""),
         }
         for index, r in enumerate(answer_hits, start=1)
     ]
     if payload.trust_mode and assessment["evidence_status"] == "insufficient":
         answer = _insufficient_evidence_answer(question, sources, assessment)
+    elif payload.trust_mode and assessment["evidence_status"] == "limited" and answer_mode in {"answer", "study_guide"}:
+        answer = extractive_answer(question=question, sources=sources, answer_mode=answer_mode)
     else:
         answer = rag_engine.generate_answer(question=question, sources=sources, answer_mode=answer_mode)
     return {
