@@ -21,6 +21,8 @@ export interface StatsResponse {
   total_chunks: number;
   graph_nodes: number;
   last_index_time: string;
+  chunking_version: string;
+  reindex_recommended: boolean;
   embedding_model: string;
   embedding_mode: string;
   vector_backend: string;
@@ -50,6 +52,8 @@ export interface SearchItem {
   source_file: string;
   page_number: number | null;
   chunk_index: number;
+  section_path: string[];
+  block_kind: string;
 }
 
 export interface SearchResponse {
@@ -68,6 +72,8 @@ export interface AskSource {
   text: string;
   source_file: string;
   page_number: number | null;
+  section_path: string[];
+  block_kind: string;
 }
 
 export interface AskResponse {
@@ -182,6 +188,10 @@ export async function ingestDemoData(): Promise<IngestResponse> {
   return req<IngestResponse>("/ingest_demo", { method: "POST" });
 }
 
+export async function reindexKnowledgeBase(): Promise<IngestResponse> {
+  return req<IngestResponse>("/reindex", { method: "POST" });
+}
+
 export async function getStatus(jobId: string): Promise<JobStatus> {
   return req<JobStatus>(`/status?job_id=${encodeURIComponent(jobId)}`);
 }
@@ -198,10 +208,20 @@ export async function getCatalog(): Promise<SourceCatalogResponse> {
   return req<SourceCatalogResponse>("/catalog");
 }
 
-export async function semanticSearch(query: string, topK = 5): Promise<SearchResponse> {
+export async function semanticSearch(
+  query: string,
+  options?: {
+    topK?: number;
+    sourceFiles?: string[];
+  }
+): Promise<SearchResponse> {
   return req<SearchResponse>("/search", {
     method: "POST",
-    body: JSON.stringify({ query, top_k: topK })
+    body: JSON.stringify({
+      query,
+      top_k: options?.topK ?? 5,
+      source_files: options?.sourceFiles ?? []
+    })
   });
 }
 

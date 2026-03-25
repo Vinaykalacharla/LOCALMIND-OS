@@ -27,8 +27,14 @@ export default function SearchResults({ results, onOpenSource }: SearchResultsPr
               </div>
               <div className="mt-2 flex flex-wrap gap-2">
                 <span className="tag">Chunk {item.chunk_index}</span>
+                {item.block_kind ? <span className="tag">{item.block_kind}</span> : null}
                 <span className="tag">{item.chunk_id}</span>
               </div>
+              {item.section_path.length ? (
+                <div className="mt-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
+                  {item.section_path.join(" > ")}
+                </div>
+              ) : null}
             </div>
             <div className="rounded-[16px] border border-white/8 bg-white/[0.03] px-4 py-3 text-center">
               <div className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Score</div>

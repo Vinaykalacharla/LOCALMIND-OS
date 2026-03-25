@@ -445,9 +445,15 @@ export default function ChatUI() {
                                       {source.page_number ? ` (p.${source.page_number})` : ""}
                                     </span>
                                   </div>
-                                  <div className="mt-2 text-xs uppercase tracking-[0.18em] text-zinc-500">
-                                    score {source.score.toFixed(2)} • retrieval {source.retrieval_score.toFixed(2)}
+                                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                                    <span>score {source.score.toFixed(2)} | retrieval {source.retrieval_score.toFixed(2)}</span>
+                                    {source.block_kind ? <span className="tag">{source.block_kind}</span> : null}
                                   </div>
+                                  {source.section_path.length ? (
+                                    <div className="mt-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500">
+                                      {source.section_path.join(" > ")}
+                                    </div>
+                                  ) : null}
                                 </div>
                                 <div className="w-24 rounded-full bg-white/[0.05] p-1">
                                   <div
