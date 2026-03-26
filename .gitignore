@@ -30,3 +30,6 @@ frontend/tsconfig.tsbuildinfo
 
 # Temporary / local staging
 __remote_inspect/
+
+# Local backup snapshots
+backend/data_reset_backup_*/
