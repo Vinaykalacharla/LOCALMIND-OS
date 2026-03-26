@@ -1,11 +1,11 @@
 # LocalMind OS
 
-LocalMind OS is a local-first knowledge workspace built for private document ingestion, semantic search, grounded chat, and knowledge exploration. The project combines a Next.js frontend with a FastAPI backend, FAISS-based vector retrieval, encrypted local storage, and an optional offline GGUF model runtime through `llama-cpp-python`.
+LocalMind OS is a local-first knowledge workspace built for private document ingestion, semantic search, grounded chat, and knowledge exploration. The project combines a Next.js frontend with a FastAPI backend, FAISS-based vector retrieval, encrypted local storage, an optional offline reranker, and a local GGUF runtime through `llama-cpp-python`.
 
 ## What It Does
 
 - Ingest PDFs, notes, code, and structured text files into a local knowledge base
-- Chunk and embed documents for semantic search
+- Chunk documents with heading-aware overlap and embed them for semantic search
 - Run grounded RAG chat over local data
 - Scope questions to selected files only
 - Show trust signals such as evidence quality and confidence status
@@ -17,7 +17,8 @@ LocalMind OS is a local-first knowledge workspace built for private document ing
 
 ### Retrieval and chat
 
-- Hybrid retrieval using dense vector search plus lexical reranking
+- Hybrid retrieval using dense vector search plus lexical scoring
+- Optional local cross-encoder reranking for stronger offline search quality
 - `top_k` retrieval controls for search
 - Trust-mode chat that can refuse weakly grounded answers
 - Inline citations and evidence panels for retrieved sources
@@ -42,10 +43,10 @@ LocalMind OS is a local-first knowledge workspace built for private document ing
 Next.js frontend
   -> FastAPI backend
   -> document extraction
-  -> paragraph-aware chunking
-  -> sentence-transformers embeddings
+  -> structured chunking with overlap
+  -> local sentence-transformers embeddings
   -> FAISS vector index
-  -> hybrid reranking
+  -> optional local reranker
   -> local GGUF model via llama-cpp-python
   -> grounded answer + evidence metadata
 ```
@@ -68,7 +69,8 @@ Next.js frontend
 
 ### Local AI stack
 
-- SentenceTransformers (`all-MiniLM-L6-v2`) for embeddings
+- SentenceTransformers for local embeddings
+- Optional local cross-encoder reranker
 - FAISS for vector search
 - `llama-cpp-python` for local inference
 - GGUF models for offline generation
@@ -131,7 +133,7 @@ Frontend:
 
 ## Offline Model Setup
 
-The repo intentionally does not commit GGUF model binaries. Place a local model file under `backend/models/`.
+The repo intentionally does not commit model binaries. Keep everything local under `backend/models/`.
 
 Recommended range for an 8 GB RAM CPU-only laptop:
 
@@ -142,7 +144,13 @@ Example tested locally:
 
 - `qwen2.5-1.5b-instruct-q4_k_m.gguf`
 
-Once a supported GGUF file is present and `llama-cpp-python` is installed, the backend can use the fully local `llama-cpp` path.
+Recommended high-quality offline stack:
+
+- `backend/models/*.gguf` for the local chat model
+- `backend/models/embeddings/<model-folder>/` for a local embedding model
+- `backend/models/rerankers/<model-folder>/` for a local reranker
+
+The backend now defaults to local-only inference. No third-party API key is required for normal operation.
 
 ## Security and Passphrase
 

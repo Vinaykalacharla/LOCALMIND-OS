@@ -117,6 +117,8 @@ class VectorIndex:
         q = np.asarray(query_vector, dtype=np.float32)
         if q.ndim == 1:
             q = q.reshape(1, -1)
+        if self._dim and q.shape[1] != self._dim:
+            return []
 
         if self._use_faiss and self._index is not None:
             distances, indices = self._index.search(q, min(top_k, self.size))

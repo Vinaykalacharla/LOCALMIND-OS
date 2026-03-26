@@ -49,6 +49,12 @@ export function formatErrorMessage(raw: string, fallback: string): string {
     if (typeof parsed.detail === "string" && parsed.detail.trim()) {
       return parsed.detail;
     }
+    if (Array.isArray(parsed.detail) && parsed.detail.length > 0) {
+      const first = parsed.detail[0] as Record<string, unknown>;
+      if (typeof first?.msg === "string" && first.msg.trim()) {
+        return first.msg;
+      }
+    }
     if (typeof parsed.message === "string" && parsed.message.trim()) {
       return parsed.message;
     }

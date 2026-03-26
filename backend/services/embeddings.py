@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -11,6 +13,10 @@ import numpy as np
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}")
 HASHED_TFIDF_DIM = 2048
 HASHED_TFIDF_VERSION = "stable-blake2b-v1"
+DEFAULT_EMBEDDING_CANDIDATES = [
+    "sentence-transformers/all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2",
+]
 
 
 def _tokenize(text: str) -> List[str]:
@@ -32,7 +38,7 @@ class EmbeddingResult:
 
 
 class HashedTfidfEncoder:
-    def __init__(self, dim: int = 2048) -> None:
+    def __init__(self, dim: int = HASHED_TFIDF_DIM) -> None:
         self.dim = dim
         self.idf = np.ones((dim,), dtype=np.float32)
         self.fitted = False
@@ -68,28 +74,112 @@ class HashedTfidfEncoder:
 
 
 class EmbeddingService:
-    def __init__(self) -> None:
+    def __init__(self, models_dir: Path | None = None, preferred_model: str | None = None) -> None:
+        self.models_dir = models_dir or (Path(__file__).resolve().parents[1] / "models")
+        self.preferred_model = (preferred_model or "").strip()
         self.mode = "hashed-tfidf"
         self.model_name = f"hashed-tfidf-{HASHED_TFIDF_DIM}"
+        self.last_error = ""
         self._st_model = None
         self._fallback = HashedTfidfEncoder(dim=HASHED_TFIDF_DIM)
         self._initialize_primary()
 
-    def _initialize_primary(self) -> None:
-        try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+    def _resolve_candidate(self, candidate: str) -> str:
+        resolved = Path(candidate)
+        if not resolved.is_absolute():
+            local_path = self.models_dir / candidate
+            if local_path.exists():
+                resolved = local_path
+        return str(resolved)
 
-            model_name = "all-MiniLM-L6-v2"
-            try:
-                self._st_model = SentenceTransformer(model_name, local_files_only=True)
-            except TypeError:
-                self._st_model = SentenceTransformer(model_name)
-            self.mode = "sentence-transformers"
-            self.model_name = model_name
-        except Exception:
+    def _embedding_candidates(self) -> List[str]:
+        seen: set[str] = set()
+        candidates: List[str] = []
+
+        def add(candidate: str) -> None:
+            normalized = candidate.strip()
+            if not normalized:
+                return
+            key = normalized.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(normalized)
+
+        preferred = self.preferred_model.strip()
+        if preferred and preferred.lower() not in {"auto", "hashed-tfidf", "fallback"}:
+            add(self._resolve_candidate(preferred))
+            return candidates
+
+        configured = os.getenv("LOCALMIND_EMBEDDING_MODEL", "").strip()
+        if configured:
+            add(self._resolve_candidate(configured))
+
+        embedding_dir = self.models_dir / "embeddings"
+        if embedding_dir.exists():
+            for child in sorted(embedding_dir.iterdir()):
+                if child.is_dir():
+                    add(str(child))
+
+        for candidate in DEFAULT_EMBEDDING_CANDIDATES:
+            add(candidate)
+
+        return candidates
+
+    def _load_sentence_transformer(self, sentence_transformer_cls: Any, candidate: str) -> Any | None:
+        try:
+            return sentence_transformer_cls(candidate, local_files_only=True)
+        except TypeError:
+            if Path(candidate).exists():
+                try:
+                    return sentence_transformer_cls(candidate)
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    return None
+            return None
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
+
+    def _initialize_primary(self) -> None:
+        self.last_error = ""
+        self._st_model = None
+        preferred = self.preferred_model.strip().lower()
+        if preferred in {"hashed-tfidf", "fallback"}:
             self.mode = "hashed-tfidf"
             self.model_name = f"hashed-tfidf-{self._fallback.dim}"
-            self._st_model = None
+            return
+
+        try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
+        except Exception as exc:
+            self.mode = "hashed-tfidf"
+            self.model_name = f"hashed-tfidf-{self._fallback.dim}"
+            self.last_error = str(exc)
+            return
+
+        for candidate in self._embedding_candidates():
+            loaded = self._load_sentence_transformer(SentenceTransformer, candidate)
+            if loaded is None:
+                continue
+            self._st_model = loaded
+            self.mode = "sentence-transformers"
+            self.model_name = Path(candidate).name if Path(candidate).exists() else candidate
+            return
+
+        self.mode = "hashed-tfidf"
+        self.model_name = f"hashed-tfidf-{self._fallback.dim}"
+        if self.preferred_model.strip() and preferred not in {"", "auto", "hashed-tfidf", "fallback"} and not self.last_error:
+            self.last_error = f"Failed to load embedding model: {self.preferred_model}"
+
+    def reload(self, preferred_model: str | None = None) -> None:
+        if preferred_model is not None:
+            self.preferred_model = preferred_model.strip()
+        self.mode = "hashed-tfidf"
+        self.model_name = f"hashed-tfidf-{self._fallback.dim}"
+        self.last_error = ""
+        self._st_model = None
+        self._initialize_primary()
 
     def index_signature(self) -> str:
         if self.mode == "sentence-transformers" and self._st_model is not None:
@@ -105,7 +195,6 @@ class EmbeddingService:
         if texts:
             self._fallback.fit(texts)
             return
-
         self._fallback = HashedTfidfEncoder(dim=self._fallback.dim)
 
     def embed_corpus(self, texts: List[str]) -> EmbeddingResult:

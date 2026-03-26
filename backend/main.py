@@ -23,7 +23,8 @@ from services.embeddings import EmbeddingService
 from services.graph import GraphBuilder
 from services.ingestion import extract_many
 from services.insights import build_insights
-from services.rag import RAGEngine, extractive_answer
+from services.rag import RAGEngine, _gguf_quality_score, extractive_answer
+from services.reranker import RerankerService
 from services.security import SecurityError, SecurityManager
 from services.vector_index import VectorIndex
 
@@ -40,6 +41,8 @@ META_FILE = DATA_DIR / "meta.json"
 GRAPH_FILE = DATA_DIR / "graph.json"
 QUERY_LOG_FILE = DATA_DIR / "query_log.jsonl"
 SECURITY_FILE = DATA_DIR / "security.json"
+MODEL_SETTINGS_FILE = DATA_DIR / "model_settings.json"
+CONVERSATIONS_FILE = DATA_DIR / "conversations.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,10 +70,17 @@ class AskRequest(BaseModel):
     source_files: List[str] = Field(default_factory=list)
     mode: str = Field(default="answer", min_length=1, max_length=40)
     trust_mode: bool = True
+    session_id: Optional[str] = None
 
 
 class SecurityPassphraseRequest(BaseModel):
     passphrase: str = Field(min_length=8, max_length=512)
+
+
+class ModelSettingsRequest(BaseModel):
+    llm: Optional[str] = None
+    embedding: Optional[str] = None
+    reranker: Optional[str] = None
 
 
 @dataclass
@@ -111,11 +121,14 @@ graph_cache: Dict[str, List[Dict[str, Any]]] = {"nodes": [], "edges": []}
 retrieval_stats = _empty_retrieval_stats()
 chunk_sequences: Dict[tuple[str, int | None], List[Dict[str, Any]]] = {}
 chunk_sequence_positions: Dict[str, int] = {}
+model_settings: Dict[str, str] = {"llm": "auto", "embedding": "auto", "reranker": "auto"}
+conversations_store: List[Dict[str, Any]] = []
 
 security_manager = SecurityManager(SECURITY_FILE)
-embedding_service = EmbeddingService()
+embedding_service = EmbeddingService(MODELS_DIR)
 vector_index = VectorIndex()
 graph_builder = GraphBuilder()
+reranker_service = RerankerService(MODELS_DIR)
 rag_engine = RAGEngine(MODELS_DIR)
 
 
@@ -165,7 +178,7 @@ def utc_now_iso() -> str:
 
 
 def reset_runtime_state(*, clear_jobs: bool = False) -> None:
-    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index, retrieval_stats, chunk_sequences, chunk_sequence_positions
+    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index, retrieval_stats, chunk_sequences, chunk_sequence_positions, conversations_store
     chunks_store = []
     chunk_by_id = {}
     index_map = {}
@@ -174,6 +187,7 @@ def reset_runtime_state(*, clear_jobs: bool = False) -> None:
     retrieval_stats = _empty_retrieval_stats()
     chunk_sequences = {}
     chunk_sequence_positions = {}
+    conversations_store = []
     vector_index = VectorIndex()
     if clear_jobs:
         with jobs_lock:
@@ -188,10 +202,399 @@ def _artifact_is_upload(path: Path) -> bool:
 
 
 def _managed_artifact_paths() -> List[Path]:
-    paths = [CHUNKS_FILE, INDEX_FILE, INDEX_MAP_FILE, META_FILE, GRAPH_FILE, QUERY_LOG_FILE]
+    paths = [CHUNKS_FILE, INDEX_FILE, INDEX_MAP_FILE, META_FILE, GRAPH_FILE, QUERY_LOG_FILE, MODEL_SETTINGS_FILE, CONVERSATIONS_FILE]
     if UPLOADS_DIR.exists():
         paths.extend(p for p in UPLOADS_DIR.rglob("*") if p.is_file())
     return paths
+
+
+def _default_model_settings() -> Dict[str, str]:
+    return {"llm": "auto", "embedding": "auto", "reranker": "auto"}
+
+
+def _normalize_model_choice(scope: str, value: str | None) -> str:
+    cleaned = (value or "").strip()
+    lowered = cleaned.lower()
+    if scope == "llm":
+        if not cleaned or lowered == "auto":
+            return "auto"
+        if lowered in {"extractive-fallback", "fallback", "disabled", "none"}:
+            return "extractive-fallback"
+        return cleaned
+    if scope == "embedding":
+        if not cleaned or lowered == "auto":
+            return "auto"
+        if lowered in {"hashed-tfidf", "fallback", "disabled"}:
+            return "hashed-tfidf"
+        return cleaned
+    if scope == "reranker":
+        if not cleaned or lowered == "auto":
+            return "auto"
+        if lowered in {"disabled", "lexical-only", "none"}:
+            return "disabled"
+        return cleaned
+    return cleaned
+
+
+def _load_model_settings() -> Dict[str, str]:
+    raw = _load_json_artifact(MODEL_SETTINGS_FILE, {})
+    settings = _default_model_settings()
+    if isinstance(raw, dict):
+        for key in settings:
+            settings[key] = _normalize_model_choice(key, str(raw.get(key, "")))
+    return settings
+
+
+def _save_model_settings(settings: Dict[str, str]) -> None:
+    payload = json.dumps(settings, indent=2, ensure_ascii=True).encode("utf-8")
+    staged = _stage_bytes_file(MODEL_SETTINGS_FILE, payload, encrypt=security_manager.configured)
+    try:
+        os.replace(staged, MODEL_SETTINGS_FILE)
+    finally:
+        if staged.exists():
+            staged.unlink(missing_ok=True)
+
+
+def _load_conversations() -> List[Dict[str, Any]]:
+    raw = _load_json_artifact(CONVERSATIONS_FILE, [])
+    if not isinstance(raw, list):
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        messages = item.get("messages")
+        cleaned.append(
+            {
+                "session_id": str(item.get("session_id") or uuid.uuid4().hex),
+                "title": str(item.get("title") or "New chat"),
+                "created_at": str(item.get("created_at") or utc_now_iso()),
+                "updated_at": str(item.get("updated_at") or item.get("created_at") or utc_now_iso()),
+                "messages": list(messages) if isinstance(messages, list) else [],
+            }
+        )
+    cleaned.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+    return cleaned
+
+
+def _save_conversations() -> None:
+    payload = json.dumps(conversations_store, indent=2, ensure_ascii=True).encode("utf-8")
+    staged = _stage_bytes_file(CONVERSATIONS_FILE, payload, encrypt=security_manager.configured)
+    try:
+        os.replace(staged, CONVERSATIONS_FILE)
+    finally:
+        if staged.exists():
+            staged.unlink(missing_ok=True)
+
+
+def _conversation_title(question: str) -> str:
+    normalized = " ".join(question.strip().split())
+    if not normalized:
+        return "New chat"
+    return normalized[:72]
+
+
+def _find_conversation(session_id: str) -> Dict[str, Any] | None:
+    for conversation in conversations_store:
+        if str(conversation.get("session_id")) == session_id:
+            return conversation
+    return None
+
+
+def _conversation_summaries() -> List[Dict[str, Any]]:
+    summaries: List[Dict[str, Any]] = []
+    for conversation in sorted(conversations_store, key=lambda row: str(row.get("updated_at") or ""), reverse=True):
+        messages = list(conversation.get("messages") or [])
+        summaries.append(
+            {
+                "session_id": conversation.get("session_id"),
+                "title": conversation.get("title", "New chat"),
+                "message_count": len(messages),
+                "created_at": conversation.get("created_at", ""),
+                "updated_at": conversation.get("updated_at", ""),
+                "last_message_preview": str(messages[-1].get("text", ""))[:120] if messages else "",
+            }
+        )
+    return summaries
+
+
+def _conversation_followup_query(question: str, history: Sequence[Dict[str, Any]]) -> str:
+    normalized = question.strip()
+    if not history:
+        return normalized
+
+    user_messages = [str(message.get("text") or "").strip() for message in history if str(message.get("role") or "") == "user"]
+    user_messages = [text for text in user_messages if text]
+    if not user_messages:
+        return normalized
+
+    lowered = normalized.lower()
+    followup_prefixes = (
+        "and ",
+        "also ",
+        "what about",
+        "how about",
+        "why ",
+        "how ",
+        "what ",
+        "compare ",
+        "then ",
+    )
+    referential_tokens = {"it", "that", "those", "them", "this", "these", "he", "she", "they"}
+    question_terms = _query_terms(normalized)
+    is_followup = (
+        len(question_terms) <= 3
+        or lowered.startswith(followup_prefixes)
+        or any(token in referential_tokens for token in _tokenize_query_text(lowered)[:3])
+    )
+    if not is_followup:
+        return normalized
+
+    recent_context = user_messages[-2:]
+    return " ".join([*recent_context, normalized])[:420]
+
+
+def _serialize_conversation_message(
+    *,
+    role: str,
+    text: str,
+    answer_mode: str | None = None,
+    sources: Sequence[Dict[str, Any]] | None = None,
+    confidence: float | None = None,
+    confidence_label: str | None = None,
+    evidence_status: str | None = None,
+    follow_up_question: str | None = None,
+    used_scope: Sequence[str] | None = None,
+    trust_mode: bool | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "id": f"msg_{uuid.uuid4().hex[:12]}",
+        "role": role,
+        "text": text,
+        "created_at": utc_now_iso(),
+    }
+    if answer_mode is not None:
+        payload["answer_mode"] = answer_mode
+    if sources is not None:
+        payload["sources"] = list(sources)
+    if confidence is not None:
+        payload["confidence"] = confidence
+    if confidence_label is not None:
+        payload["confidence_label"] = confidence_label
+    if evidence_status is not None:
+        payload["evidence_status"] = evidence_status
+    if follow_up_question is not None:
+        payload["follow_up_question"] = follow_up_question
+    if used_scope is not None:
+        payload["used_scope"] = list(used_scope)
+    if trust_mode is not None:
+        payload["trust_mode"] = trust_mode
+    return payload
+
+
+def _model_choice_label(scope: str, choice: str) -> str:
+    normalized = _normalize_model_choice(scope, choice)
+    if scope == "llm":
+        if normalized == "auto":
+            return "Auto-select best local GGUF"
+        if normalized == "extractive-fallback":
+            return "Extractive fallback only"
+    if scope == "embedding":
+        if normalized == "auto":
+            return "Auto-select local embedding model"
+        if normalized == "hashed-tfidf":
+            return "Hashed TF-IDF fallback"
+    if scope == "reranker":
+        if normalized == "auto":
+            return "Auto-select local reranker"
+        if normalized == "disabled":
+            return "Disabled"
+    return Path(normalized).name
+
+
+def _model_validation(scope: str, requested: str, *, mode: str, model_name: str, last_error: str = "") -> Dict[str, Any]:
+    normalized = _normalize_model_choice(scope, requested)
+    requested_label = _model_choice_label(scope, normalized)
+    active_label = model_name or mode or "unknown"
+
+    if scope == "llm":
+        if normalized == "auto":
+            return {
+                "ok": True,
+                "detail": f"Auto mode active. Runtime selected {active_label}.",
+                "selected": normalized,
+                "active_mode": mode,
+                "active_model": model_name,
+            }
+        if normalized == "extractive-fallback":
+            ok = mode == "extractive-fallback"
+            detail = "Extractive fallback is active." if ok else f"Expected extractive fallback, found {active_label}."
+            return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+        expected_name = Path(normalized).name
+        ok = mode == "llama-cpp" and model_name == expected_name
+        detail = f"Loaded {expected_name}." if ok else (last_error or f"Could not load {expected_name}; active runtime is {active_label}.")
+        return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+
+    if scope == "embedding":
+        if normalized == "auto":
+            return {
+                "ok": True,
+                "detail": f"Auto mode active. Runtime selected {active_label}.",
+                "selected": normalized,
+                "active_mode": mode,
+                "active_model": model_name,
+            }
+        if normalized == "hashed-tfidf":
+            ok = mode == "hashed-tfidf"
+            detail = "Hashed TF-IDF fallback is active." if ok else f"Expected hashed TF-IDF, found {active_label}."
+            return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+        expected_name = Path(normalized).name
+        ok = mode == "sentence-transformers" and model_name == expected_name
+        detail = f"Loaded {expected_name}." if ok else (last_error or f"Could not load {expected_name}; active runtime is {active_label}.")
+        return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+
+    if normalized == "auto":
+        return {
+            "ok": True,
+            "detail": (
+                f"Auto mode active. Runtime selected {active_label}."
+                if mode == "cross-encoder"
+                else "Auto mode active. No local reranker is loaded."
+            ),
+            "selected": normalized,
+            "active_mode": mode,
+            "active_model": model_name,
+        }
+    if normalized == "disabled":
+        ok = mode == "disabled"
+        detail = "Reranker is disabled." if ok else f"Expected reranker disabled, found {active_label}."
+        return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+
+    expected_name = Path(normalized).name
+    ok = mode == "cross-encoder" and model_name == expected_name
+    detail = f"Loaded {expected_name}." if ok else (last_error or f"Could not load {expected_name}; active runtime is {active_label}.")
+    return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+
+
+def _build_runtime_stack(settings: Dict[str, str], rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    next_embedding = EmbeddingService(MODELS_DIR, preferred_model=settings["embedding"])
+    next_embedding.prepare_runtime([str(row.get("text", "")) for row in rows if str(row.get("text", "")).strip()])
+    next_reranker = RerankerService(MODELS_DIR, preferred_model=settings["reranker"])
+    next_rag = RAGEngine(MODELS_DIR, provider="local", preferred_local_model=settings["llm"])
+
+    validation = {
+        "llm": _model_validation(
+            "llm",
+            settings["llm"],
+            mode=next_rag.mode,
+            model_name=next_rag.model_name,
+            last_error=next_rag.last_error,
+        ),
+        "embedding": _model_validation(
+            "embedding",
+            settings["embedding"],
+            mode=next_embedding.mode,
+            model_name=next_embedding.model_name,
+            last_error=next_embedding.last_error,
+        ),
+        "reranker": _model_validation(
+            "reranker",
+            settings["reranker"],
+            mode=next_reranker.mode,
+            model_name=next_reranker.model_name,
+            last_error=next_reranker.last_error,
+        ),
+    }
+
+    return {
+        "settings": dict(settings),
+        "embedding_service": next_embedding,
+        "reranker_service": next_reranker,
+        "rag_engine": next_rag,
+        "validation": validation,
+    }
+
+
+def _apply_runtime_stack(stack: Dict[str, Any]) -> None:
+    global embedding_service, reranker_service, rag_engine, model_settings
+    embedding_service = stack["embedding_service"]
+    reranker_service = stack["reranker_service"]
+    rag_engine = stack["rag_engine"]
+    model_settings = dict(stack["settings"])
+
+
+def _model_options() -> Dict[str, List[Dict[str, str]]]:
+    llm_files = sorted(MODELS_DIR.glob("*.gguf"), key=lambda path: _gguf_quality_score(path), reverse=True)
+    embedding_root = MODELS_DIR / "embeddings"
+    reranker_root = MODELS_DIR / "rerankers"
+    embedding_dirs = [path for path in sorted(embedding_root.iterdir()) if path.is_dir()] if embedding_root.exists() else []
+    reranker_dirs = [path for path in sorted(reranker_root.iterdir()) if path.is_dir()] if reranker_root.exists() else []
+
+    return {
+        "llm": [
+            {"id": "auto", "label": "Auto-select", "detail": "Pick the strongest local GGUF automatically."},
+            {"id": "extractive-fallback", "label": "Extractive fallback", "detail": "Disable local generation and answer only from retrieved text."},
+            *[
+                {"id": path.name, "label": path.name, "detail": "GGUF model under backend/models."}
+                for path in llm_files
+            ],
+        ],
+        "embedding": [
+            {"id": "auto", "label": "Auto-select", "detail": "Pick the first available local embedding model or use the offline fallback."},
+            {"id": "hashed-tfidf", "label": "Hashed TF-IDF", "detail": "Stay fully offline with the built-in fallback embedder."},
+            *[
+                {"id": f"embeddings/{path.name}", "label": path.name, "detail": "Local embedding model folder."}
+                for path in embedding_dirs
+            ],
+        ],
+        "reranker": [
+            {"id": "auto", "label": "Auto-select", "detail": "Use the first available local reranker automatically."},
+            {"id": "disabled", "label": "Disabled", "detail": "Skip reranking and keep hybrid lexical plus vector scoring only."},
+            *[
+                {"id": f"rerankers/{path.name}", "label": path.name, "detail": "Local reranker model folder."}
+                for path in reranker_dirs
+            ],
+        ],
+    }
+
+
+def _build_model_manager_response(validation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    current_validation = validation or {
+        "llm": _model_validation("llm", model_settings["llm"], mode=rag_engine.mode, model_name=rag_engine.model_name, last_error=getattr(rag_engine, "last_error", "")),
+        "embedding": _model_validation("embedding", model_settings["embedding"], mode=embedding_service.mode, model_name=embedding_service.model_name, last_error=getattr(embedding_service, "last_error", "")),
+        "reranker": _model_validation("reranker", model_settings["reranker"], mode=reranker_service.mode, model_name=reranker_service.model_name, last_error=getattr(reranker_service, "last_error", "")),
+    }
+    return {
+        "indexed_chunks": len(chunks_store),
+        "reindex_recommended": _reindex_recommended(chunks_store, meta, vector_index),
+        "index_embedding_model": str(meta.get("embedding_model") or ""),
+        "index_embedding_signature": str(meta.get("embedding_signature") or ""),
+        "model_roots": {
+            "llm": str(MODELS_DIR),
+            "embedding": str(MODELS_DIR / "embeddings"),
+            "reranker": str(MODELS_DIR / "rerankers"),
+        },
+        "llm": {
+            "selected": model_settings["llm"],
+            "active_mode": rag_engine.mode,
+            "active_model": rag_engine.model_name,
+            "options": _model_options()["llm"],
+        },
+        "embedding": {
+            "selected": model_settings["embedding"],
+            "active_mode": embedding_service.mode,
+            "active_model": embedding_service.model_name,
+            "requires_reindex": _reindex_recommended(chunks_store, meta, vector_index),
+            "options": _model_options()["embedding"],
+        },
+        "reranker": {
+            "selected": model_settings["reranker"],
+            "active_mode": reranker_service.mode,
+            "active_model": reranker_service.model_name,
+            "options": _model_options()["reranker"],
+        },
+        "validation": current_validation,
+    }
 
 
 def _stage_bytes_file(path: Path, payload: bytes, *, encrypt: bool) -> Path:
@@ -341,7 +744,7 @@ def _build_retrieval_runtime(
         grouped_sequences.setdefault(_source_sequence_key(row), []).append(row)
 
     sequence_positions: Dict[str, int] = {}
-    for key, items in grouped_sequences.items():
+    for items in grouped_sequences.values():
         items.sort(key=lambda item: (int(item.get("chunk_index", 0)), str(item.get("chunk_id", ""))))
         for index, item in enumerate(items):
             chunk_id = str(item.get("chunk_id") or "")
@@ -408,7 +811,7 @@ def prepare_index_state(rows: List[Dict[str, Any]], previous_meta: Dict[str, Any
 
 
 def commit_prepared_state(prepared: PreparedIndexState) -> None:
-    global chunks_store, index_map, meta, graph_cache, vector_index
+    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index
 
     encrypt = security_manager.configured
     staged_chunks = _stage_bytes_file(CHUNKS_FILE, _serialize_chunks(prepared.chunks), encrypt=encrypt)
@@ -450,6 +853,7 @@ def commit_prepared_state(prepared: PreparedIndexState) -> None:
                 staged.unlink(missing_ok=True)
 
     chunks_store = prepared.chunks
+    chunk_by_id = prepared.chunk_by_id
     index_map = prepared.index_map
     meta = prepared.meta
     graph_cache = prepared.graph_cache
@@ -518,45 +922,30 @@ def _persisted_index_needs_rebuild(
 ) -> bool:
     if not rows:
         return False
-
     if current_vector_index.size != len(rows):
         return True
-
+    if str(current_meta.get("chunking_version") or "") != CHUNKING_VERSION:
+        return True
     stored_signature = str(current_meta.get("embedding_signature") or "").strip()
-    current_signature = embedding_service.index_signature()
     if not stored_signature:
         return True
-    if stored_signature != current_signature:
-        return True
-
-    stored_chunks = int(current_meta.get("total_chunks") or len(rows))
-    return stored_chunks != len(rows)
+    return stored_signature != embedding_service.index_signature()
 
 
 def load_persisted_state() -> None:
-    global chunks_store, index_map, meta, graph_cache, vector_index
-    loaded_chunks = load_chunks()
-    loaded_index_map = _load_json_artifact(INDEX_MAP_FILE, {})
-    loaded_meta = _load_json_artifact(META_FILE, {})
-    loaded_graph_cache = _load_json_artifact(GRAPH_FILE, {"nodes": [], "edges": []})
-    loaded_vector_index = load_vector_index()
-
-    _prepare_runtime_embeddings(loaded_chunks)
-
-    if _persisted_index_needs_rebuild(loaded_chunks, loaded_meta, loaded_vector_index):
-        prepared = prepare_index_state(
-            list(loaded_chunks),
-            loaded_meta,
-            last_index_time=str(loaded_meta.get("last_index_time") or utc_now_iso()),
-        )
+    global chunks_store, index_map, meta, graph_cache, vector_index, conversations_store
+    chunks_store = load_chunks()
+    index_map = _load_json_artifact(INDEX_MAP_FILE, {})
+    meta = _load_json_artifact(META_FILE, {})
+    graph_cache = _load_json_artifact(GRAPH_FILE, {"nodes": [], "edges": []})
+    conversations_store = _load_conversations()
+    vector_index = load_vector_index()
+    stack = _build_runtime_stack(_load_model_settings(), chunks_store)
+    _apply_runtime_stack(stack)
+    if _persisted_index_needs_rebuild(chunks_store, meta, vector_index):
+        prepared = prepare_index_state(chunks_store, meta, last_index_time=str(meta.get("last_index_time") or utc_now_iso()))
         commit_prepared_state(prepared)
         return
-
-    chunks_store = loaded_chunks
-    index_map = loaded_index_map
-    meta = loaded_meta
-    graph_cache = loaded_graph_cache
-    vector_index = loaded_vector_index
     refresh_memory_maps()
 
 
@@ -581,62 +970,6 @@ def materialize_input_paths(file_paths: List[Path]) -> Iterator[List[Path]]:
         yield materialized
 
 
-def _build_chunks_from_docs(docs: Sequence[Any]) -> List[Dict[str, Any]]:
-    new_chunks: List[Dict[str, Any]] = []
-    for doc in docs:
-        pieces = chunk_document(doc.text, chunk_size=900, overlap=150)
-        for idx, piece in enumerate(pieces):
-            new_chunks.append(
-                {
-                    "chunk_id": f"chunk_{uuid.uuid4().hex[:12]}",
-                    "text": piece.text,
-                    "source_file": doc.source_file,
-                    "source_id": getattr(doc, "source_id", None),
-                    "page_number": doc.page_number,
-                    "chunk_index": idx,
-                    "section_path": piece.section_path,
-                    "block_kind": piece.block_kind,
-                    "created_at": utc_now_iso(),
-                }
-            )
-    return new_chunks
-
-
-def _indexed_source_names(current_chunks: Sequence[Dict[str, Any]], current_meta: Dict[str, Any]) -> set[str]:
-    names = {str(row.get("source_file") or "").strip() for row in current_chunks if str(row.get("source_file") or "").strip()}
-    names.update(str(name).strip() for name in current_meta.get("indexed_files", []) if str(name).strip())
-    return names
-
-
-def _collect_reindex_source_paths(current_chunks: Sequence[Dict[str, Any]], current_meta: Dict[str, Any]) -> tuple[List[Path], List[str]]:
-    indexed_names = _indexed_source_names(current_chunks, current_meta)
-
-    upload_paths = sorted(p for p in UPLOADS_DIR.rglob("*") if p.is_file())
-    selected_paths: List[Path] = list(upload_paths)
-    seen_locations = {str(path.resolve()) for path in selected_paths}
-
-    demo_lookup = {p.name: p for p in DEMO_DATA_DIR.glob("*") if p.is_file()}
-    for name in sorted(indexed_names):
-        demo_path = demo_lookup.get(name)
-        if demo_path is None:
-            continue
-        resolved = str(demo_path.resolve())
-        if resolved in seen_locations:
-            continue
-        selected_paths.append(demo_path)
-        seen_locations.add(resolved)
-
-    available_names = {path.name for path in selected_paths}
-    missing_names = sorted(name for name in indexed_names if name not in available_names)
-    return selected_paths, missing_names
-
-
-def _reindex_recommended(current_chunks: Sequence[Dict[str, Any]], current_meta: Dict[str, Any]) -> bool:
-    if not current_chunks:
-        return False
-    return str(current_meta.get("chunking_version") or "") != CHUNKING_VERSION
-
-
 def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
     try:
         update_job(job_id, state="processing", step="extracting", progress=10, message="Extracting text")
@@ -648,6 +981,7 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
 
         update_job(job_id, state="processing", step="chunking", progress=35, message="Creating chunks")
         skipped_files: List[str] = []
+        new_chunks: List[Dict[str, Any]] = []
         with index_lock:
             docs, skipped_files = filter_new_documents(docs, chunks_store)
             if not docs:
@@ -660,7 +994,22 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
                 )
                 return
 
-            new_chunks = _build_chunks_from_docs(docs)
+            for doc in docs:
+                segments = chunk_document(doc.text, chunk_size=900, overlap=150)
+                for idx, segment in enumerate(segments):
+                    new_chunks.append(
+                        {
+                            "chunk_id": f"chunk_{uuid.uuid4().hex[:12]}",
+                            "text": segment.text,
+                            "source_file": doc.source_file,
+                            "source_id": getattr(doc, "source_id", None),
+                            "page_number": doc.page_number,
+                            "chunk_index": idx,
+                            "section_path": segment.section_path,
+                            "block_kind": segment.block_kind,
+                            "created_at": utc_now_iso(),
+                        }
+                    )
 
             if not new_chunks:
                 update_job(job_id, state="error", step="chunking", progress=100, message="No chunks created")
@@ -685,45 +1034,14 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
 
 def process_reindex(job_id: str) -> None:
     try:
-        update_job(job_id, state="processing", step="collecting", progress=8, message="Collecting original source files")
         with index_lock:
-            current_chunks = list(chunks_store)
-            current_meta = dict(meta)
-        source_paths, missing_names = _collect_reindex_source_paths(current_chunks, current_meta)
-        if not source_paths:
-            detail = "No original files were found for reindexing"
-            if missing_names:
-                detail += f" ({len(missing_names)} missing source files)"
-            update_job(job_id, state="error", step="collecting", progress=100, message=detail)
-            return
-
-        update_job(job_id, state="processing", step="extracting", progress=24, message="Re-extracting original files")
-        with materialize_input_paths(source_paths) as readable_paths:
-            docs = extract_many(readable_paths)
-        if not docs:
-            update_job(job_id, state="error", step="extracting", progress=100, message="No readable text found during reindex")
-            return
-
-        update_job(job_id, state="processing", step="chunking", progress=48, message="Rebuilding structure-aware chunks")
-        rebuilt_chunks = _build_chunks_from_docs(docs)
-        if not rebuilt_chunks:
-            update_job(job_id, state="error", step="chunking", progress=100, message="No chunks created during reindex")
-            return
-
-        update_job(job_id, state="processing", step="embedding", progress=72, message="Recomputing embeddings")
-        with index_lock:
-            prepared = prepare_index_state(
-                rebuilt_chunks,
-                current_meta,
-                last_index_time=utc_now_iso(),
-            )
+            if not chunks_store:
+                update_job(job_id, state="done", step="completed", progress=100, message="No indexed data to reindex")
+                return
+            update_job(job_id, state="processing", step="embedding", progress=40, message="Rebuilding embeddings and vector index")
+            prepared = prepare_index_state(chunks_store, meta, last_index_time=utc_now_iso())
             commit_prepared_state(prepared)
-
-        update_job(job_id, state="processing", step="graph", progress=92, message="Refreshing graph and retrieval state")
-        message = f"Reindexed {len(rebuilt_chunks)} chunks from {len(source_paths)} source file(s)"
-        if missing_names:
-            message += f" ({len(missing_names)} missing source file(s) could not be rebuilt)"
-        update_job(job_id, state="done", step="completed", progress=100, message=message)
+        update_job(job_id, state="done", step="completed", progress=100, message=f"Reindexed {len(chunks_store)} chunks")
     except Exception as exc:
         update_job(job_id, state="error", step="failed", progress=100, message=str(exc))
 
@@ -840,14 +1158,6 @@ def ingest_demo(background_tasks: BackgroundTasks) -> Dict[str, str]:
     return {"job_id": job_id}
 
 
-@app.post("/reindex")
-def reindex(background_tasks: BackgroundTasks) -> Dict[str, str]:
-    ensure_unlocked()
-    job_id = create_job()
-    background_tasks.add_task(process_reindex, job_id)
-    return {"job_id": job_id}
-
-
 @app.get("/status")
 def status(job_id: str) -> Dict[str, Any]:
     ensure_unlocked()
@@ -855,6 +1165,23 @@ def status(job_id: str) -> Dict[str, Any]:
         if job_id not in jobs:
             return {"state": "error", "step": "unknown", "progress": 100, "message": "Job not found"}
         return jobs[job_id]
+
+
+def _reindex_recommended(
+    current_chunks: Sequence[Dict[str, Any]],
+    current_meta: Dict[str, Any],
+    current_vector_index: VectorIndex,
+) -> bool:
+    if not current_chunks:
+        return False
+    if current_vector_index.size != len(current_chunks):
+        return True
+    if str(current_meta.get("chunking_version") or "") != CHUNKING_VERSION:
+        return True
+    stored_signature = str(current_meta.get("embedding_signature") or "").strip()
+    if not stored_signature:
+        return True
+    return stored_signature != embedding_service.index_signature()
 
 
 @app.get("/stats")
@@ -870,20 +1197,27 @@ def stats() -> Dict[str, Any]:
         "total_chunks": len(current_chunks),
         "graph_nodes": len(current_graph.get("nodes", [])),
         "last_index_time": current_meta.get("last_index_time", ""),
-        "chunking_version": current_meta.get("chunking_version", ""),
-        "reindex_recommended": _reindex_recommended(current_chunks, current_meta),
-        "embedding_model": current_meta.get("embedding_model", embedding_service.model_name),
+        "chunking_version": current_meta.get("chunking_version", CHUNKING_VERSION),
+        "reindex_recommended": _reindex_recommended(current_chunks, current_meta, current_vector_index),
+        "embedding_model": embedding_service.model_name,
         "embedding_mode": embedding_service.mode,
         "vector_backend": current_vector_index.backend_name,
+        "reranker_mode": reranker_service.mode,
+        "reranker_model": reranker_service.model_name,
         "graph_mode": graph_builder.mode,
         "pdf_backend": detect_pdf_backend(),
         "llm_mode": rag_engine.mode,
+        "llm_model": rag_engine.model_name,
         "feature_status": build_feature_status(
             MODELS_DIR,
             embedding_mode=embedding_service.mode,
+            embedding_model=embedding_service.model_name,
             vector_backend=current_vector_index.backend_name,
             graph_mode=graph_builder.mode,
+            reranker_mode=reranker_service.mode,
+            reranker_model=reranker_service.model_name,
             llm_mode=rag_engine.mode,
+            llm_model=rag_engine.model_name,
         ),
     }
 
@@ -904,40 +1238,128 @@ def catalog() -> Dict[str, Any]:
     return {"sources": _build_source_catalog(current_chunks)}
 
 
+@app.get("/conversations")
+def list_conversations() -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        return {"conversations": _conversation_summaries()}
+
+
+@app.post("/conversations")
+def create_conversation() -> Dict[str, Any]:
+    ensure_unlocked()
+    conversation = {
+        "session_id": uuid.uuid4().hex,
+        "title": "New chat",
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "messages": [],
+    }
+    with index_lock:
+        conversations_store.insert(0, conversation)
+        _save_conversations()
+        return dict(conversation)
+
+
+@app.get("/conversations/{session_id}")
+def get_conversation(session_id: str) -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        conversation = _find_conversation(session_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return dict(conversation)
+
+
+@app.delete("/conversations/{session_id}")
+def delete_conversation(session_id: str) -> Dict[str, bool]:
+    ensure_unlocked()
+    with index_lock:
+        conversation = _find_conversation(session_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        conversations_store.remove(conversation)
+        _save_conversations()
+    return {"ok": True}
+
+
+@app.get("/models")
+def get_models() -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        return _build_model_manager_response()
+
+
+@app.post("/models/apply")
+def apply_models(payload: ModelSettingsRequest) -> Dict[str, Any]:
+    ensure_unlocked()
+    next_settings = dict(model_settings)
+    if payload.llm is not None:
+        next_settings["llm"] = _normalize_model_choice("llm", payload.llm)
+    if payload.embedding is not None:
+        next_settings["embedding"] = _normalize_model_choice("embedding", payload.embedding)
+    if payload.reranker is not None:
+        next_settings["reranker"] = _normalize_model_choice("reranker", payload.reranker)
+
+    with index_lock:
+        stack = _build_runtime_stack(next_settings, chunks_store)
+        invalid = [name for name, result in stack["validation"].items() if not bool(result.get("ok"))]
+        if invalid:
+            detail = "; ".join(str(stack["validation"][name]["detail"]) for name in invalid)
+            raise HTTPException(status_code=400, detail=detail)
+        _apply_runtime_stack(stack)
+        _save_model_settings(model_settings)
+        return _build_model_manager_response(validation=stack["validation"])
+
+
+@app.post("/models/validate")
+def validate_models(payload: ModelSettingsRequest) -> Dict[str, Any]:
+    ensure_unlocked()
+    next_settings = dict(model_settings)
+    if payload.llm is not None:
+        next_settings["llm"] = _normalize_model_choice("llm", payload.llm)
+    if payload.embedding is not None:
+        next_settings["embedding"] = _normalize_model_choice("embedding", payload.embedding)
+    if payload.reranker is not None:
+        next_settings["reranker"] = _normalize_model_choice("reranker", payload.reranker)
+
+    with index_lock:
+        stack = _build_runtime_stack(next_settings, chunks_store)
+        response = _build_model_manager_response(validation=stack["validation"])
+        response["llm"]["selected"] = next_settings["llm"]
+        response["embedding"]["selected"] = next_settings["embedding"]
+        response["reranker"]["selected"] = next_settings["reranker"]
+        return response
+
+
+@app.post("/reindex")
+def reindex(background_tasks: BackgroundTasks = None) -> Dict[str, str]:
+    ensure_unlocked()
+    with index_lock:
+        if not chunks_store:
+            raise HTTPException(status_code=400, detail="No indexed data to reindex")
+    job_id = create_job()
+    if background_tasks is None:
+        process_reindex(job_id)
+    else:
+        background_tasks.add_task(process_reindex, job_id)
+    return {"job_id": job_id}
+
+
+@app.get("/evaluate")
+def evaluate() -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        current_chunks = list(chunks_store)
+    return _evaluate_retrieval(current_chunks)
+
+
 def _tokenize_query_text(text: str) -> List[str]:
     return SEARCH_TOKEN_RE.findall(text.lower())
 
 
 def _query_terms(text: str) -> List[str]:
     return [token for token in _tokenize_query_text(text) if token not in SEARCH_STOPWORDS and len(token) > 2]
-
-
-def _retrieval_queries(text: str) -> List[str]:
-    normalized = text.strip()
-    if not normalized:
-        return []
-
-    variants = [normalized]
-    terms = _query_terms(normalized)
-    if terms:
-        keyword_query = " ".join(terms[:8])
-        if keyword_query and keyword_query.lower() != normalized.lower():
-            variants.append(keyword_query)
-
-        if len(terms) >= 3:
-            focused_query = " ".join(terms[:5])
-            if focused_query and focused_query.lower() not in {item.lower() for item in variants}:
-                variants.append(focused_query)
-
-    unique: List[str] = []
-    seen: set[str] = set()
-    for item in variants:
-        lowered = item.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        unique.append(item)
-    return unique
 
 
 def _normalized_source_scope(source_files: Sequence[str] | None) -> List[str]:
@@ -1000,6 +1422,150 @@ def _build_source_catalog(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
         )
     catalog.sort(key=lambda item: (-int(item["chunks"]), str(item["source_file"]).lower()))
     return catalog
+
+
+def _local_model_inventory() -> Dict[str, List[str]]:
+    embedding_root = MODELS_DIR / "embeddings"
+    reranker_root = MODELS_DIR / "rerankers"
+    return {
+        "llm_files": [path.name for path in sorted(MODELS_DIR.glob("*.gguf"))],
+        "embedding_folders": [path.name for path in sorted(embedding_root.iterdir())] if embedding_root.exists() else [],
+        "reranker_folders": [path.name for path in sorted(reranker_root.iterdir())] if reranker_root.exists() else [],
+    }
+
+
+def _evaluation_keywords(row: Dict[str, Any]) -> List[str]:
+    tokens: List[str] = []
+    for item in row.get("section_path") or []:
+        tokens.extend(_query_terms(str(item)))
+    tokens.extend(_file_name_tokens(str(row.get("source_file") or "")))
+    tokens.extend(_query_terms(str(row.get("text", "")))[:10])
+
+    unique: List[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        unique.append(token)
+    return unique[:6]
+
+
+def _evaluation_query(row: Dict[str, Any]) -> str:
+    keywords = _evaluation_keywords(row)
+    if keywords:
+        return f"Explain {' '.join(keywords)}"
+    return str(row.get("source_file") or "document")
+
+
+def _benchmark_rows(rows: Sequence[Dict[str, Any]], limit: int = 12) -> List[Dict[str, Any]]:
+    candidates = [
+        row
+        for row in rows
+        if str(row.get("chunk_id") or "").strip() and len(str(row.get("text") or "").strip()) >= 80
+    ]
+    if not candidates:
+        return []
+
+    selected: List[Dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for row in candidates:
+        source_file = str(row.get("source_file") or "")
+        if source_file in seen_sources:
+            continue
+        seen_sources.add(source_file)
+        selected.append(row)
+        if len(selected) >= limit:
+            return selected
+
+    for row in candidates:
+        if row in selected:
+            continue
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _evaluate_retrieval(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    benchmark_rows = _benchmark_rows(rows)
+    inventory = _local_model_inventory()
+    if not benchmark_rows:
+        return {
+            "total_cases": 0,
+            "retrieval_top1": 0.0,
+            "retrieval_top3": 0.0,
+            "retrieval_top5": 0.0,
+            "mean_reciprocal_rank": 0.0,
+            "avg_query_terms": 0.0,
+            "stack": {
+                "llm_mode": rag_engine.mode,
+                "llm_model": rag_engine.model_name,
+                "embedding_mode": embedding_service.mode,
+                "embedding_model": embedding_service.model_name,
+                "reranker_mode": reranker_service.mode,
+                "reranker_model": reranker_service.model_name,
+            },
+            "available_models": inventory,
+            "cases": [],
+        }
+
+    cases: List[Dict[str, Any]] = []
+    top1_hits = 0
+    top3_hits = 0
+    top5_hits = 0
+    reciprocal_rank_sum = 0.0
+    total_query_terms = 0
+
+    for row in benchmark_rows:
+        query = _evaluation_query(row)
+        total_query_terms += len(_query_terms(query))
+        results = _search_for_answer(query, 5)
+        rank = None
+        for index, result in enumerate(results, start=1):
+            if str(result.get("chunk_id")) == str(row.get("chunk_id")):
+                rank = index
+                break
+
+        top1_hits += 1 if rank == 1 else 0
+        top3_hits += 1 if rank is not None and rank <= 3 else 0
+        top5_hits += 1 if rank is not None and rank <= 5 else 0
+        reciprocal_rank_sum += 1.0 / rank if rank is not None else 0.0
+
+        top_hit = results[0] if results else {}
+        cases.append(
+            {
+                "query": query,
+                "source_file": row.get("source_file"),
+                "expected_chunk_id": row.get("chunk_id"),
+                "top_hit_chunk_id": top_hit.get("chunk_id", ""),
+                "top_hit_source_file": top_hit.get("source_file", ""),
+                "rank": rank,
+                "hit_in_top_1": rank == 1,
+                "hit_in_top_3": rank is not None and rank <= 3,
+                "hit_in_top_5": rank is not None and rank <= 5,
+            }
+        )
+
+    total_cases = len(cases)
+    return {
+        "total_cases": total_cases,
+        "retrieval_top1": round(top1_hits / max(1, total_cases), 4),
+        "retrieval_top3": round(top3_hits / max(1, total_cases), 4),
+        "retrieval_top5": round(top5_hits / max(1, total_cases), 4),
+        "mean_reciprocal_rank": round(reciprocal_rank_sum / max(1, total_cases), 4),
+        "avg_query_terms": round(total_query_terms / max(1, total_cases), 2),
+        "stack": {
+            "llm_mode": rag_engine.mode,
+            "llm_model": rag_engine.model_name,
+            "embedding_mode": embedding_service.mode,
+            "embedding_model": embedding_service.model_name,
+            "reranker_mode": reranker_service.mode,
+            "reranker_model": reranker_service.model_name,
+        },
+        "available_models": inventory,
+        "cases": cases,
+    }
 
 
 def _normalize_answer_mode(mode: str) -> str:
@@ -1090,20 +1656,37 @@ def _insufficient_evidence_answer(question: str, sources: Sequence[Dict[str, Any
     return "\n".join(lines)
 
 
+def _retrieval_queries(text: str) -> List[str]:
+    normalized = text.strip()
+    if not normalized:
+        return []
+
+    variants = [normalized]
+    terms = _query_terms(normalized)
+    if terms:
+        keyword_query = " ".join(terms[:8])
+        if keyword_query and keyword_query.lower() != normalized.lower():
+            variants.append(keyword_query)
+
+        if len(terms) >= 3:
+            focused_query = " ".join(terms[:5])
+            if focused_query and focused_query.lower() not in {item.lower() for item in variants}:
+                variants.append(focused_query)
+
+    return variants
+
+
 def _semantic_score(vector_score: float) -> float:
-    score = float(vector_score)
-    if score < 0.0:
-        score = (score + 1.0) / 2.0
-    return max(0.0, min(1.0, score))
+    return round(max(0.0, min(1.0, (float(vector_score) + 1.0) / 2.0)), 4)
 
 
-def _retrieval_intent(text: str) -> str:
-    lowered = text.lower()
+def _retrieval_intent(query: str) -> str:
+    lowered = query.lower()
     if any(token in lowered for token in ["compare", "difference", "different", "vs", "versus"]):
         return "compare"
-    if any(token in lowered for token in ["plan", "roadmap", "schedule", "revise", "revision"]):
+    if any(token in lowered for token in ["plan", "schedule", "roadmap", "revise", "revision"]):
         return "plan"
-    if any(token in lowered for token in ["list", "steps", "points", "bullets"]):
+    if any(token in lowered for token in ["list", "points", "steps", "bullets"]):
         return "list"
     return "answer"
 
@@ -1345,6 +1928,35 @@ def _select_diverse_results(candidates: Sequence[Dict[str, Any]], top_k: int) ->
     return selected
 
 
+def _rerank_candidates(query: str, candidates: Sequence[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    if reranker_service.mode != "cross-encoder" or len(candidates) < 2:
+        return [dict(candidate) for candidate in candidates]
+
+    rerank_limit = min(len(candidates), max(top_k * 6, 18))
+    reranked_head = reranker_service.rerank(query, candidates[:rerank_limit])
+    reranked_by_id = {str(candidate.get("chunk_id")): candidate for candidate in reranked_head}
+
+    blended: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        row = dict(candidate)
+        reranked = reranked_by_id.get(str(candidate.get("chunk_id")))
+        reranker_score = float(reranked.get("reranker_score", 0.0)) if reranked else 0.0
+        if reranked is not None:
+            row["reranker_score"] = reranker_score
+            row["score"] = round(min(1.0, (float(candidate.get("score", 0.0)) * 0.58) + (reranker_score * 0.42)), 4)
+        blended.append(row)
+
+    blended.sort(
+        key=lambda row: (
+            float(row.get("score", 0.0)),
+            float(row.get("reranker_score", 0.0)),
+            float(row.get("vector_score", 0.0)),
+        ),
+        reverse=True,
+    )
+    return blended
+
+
 def _expanded_chunk_text(hit: Dict[str, Any], *, max_neighbors: int = 1, max_chars: int = 1600) -> str:
     chunk_id = str(hit.get("chunk_id") or "")
     sequence_key = _source_sequence_key(hit)
@@ -1435,7 +2047,7 @@ def _search_internal(query: str, top_k: int, source_files: Sequence[str] | None 
             continue
 
         resolved_chunk_id = str(chunk.get("chunk_id") or chunk_id or f"row_{row_id}")
-        text = chunk.get("text", "")
+        text = str(chunk.get("text", ""))
         if not _passes_relevance_threshold(query, text, float(score), chunk_id=resolved_chunk_id):
             continue
         merged_candidates[resolved_chunk_id] = {
@@ -1492,6 +2104,7 @@ def _search_internal(query: str, top_k: int, source_files: Sequence[str] | None 
         key=lambda row: (float(row["score"]), float(row.get("vector_score", 0.0))),
         reverse=True,
     )
+    candidates = _rerank_candidates(query, candidates, top_k)
     return _select_diverse_results(candidates, top_k)
 
 
@@ -1565,10 +2178,17 @@ def ask(payload: AskRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     answer_mode = _normalize_answer_mode(payload.mode)
     source_scope = _normalized_source_scope(payload.source_files)
-    append_query_log("ask", question)
-    hits = _search_for_answer(question, _answer_context_limit(payload.top_k), source_files=source_scope)
+    with index_lock:
+        conversation = _find_conversation(payload.session_id) if payload.session_id else None
+        if payload.session_id and conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        history = list(conversation.get("messages") or []) if conversation else []
+
+    retrieval_question = _conversation_followup_query(question, history)
+    append_query_log("ask", retrieval_question)
+    hits = _search_for_answer(retrieval_question, _answer_context_limit(payload.top_k), source_files=source_scope)
     answer_hits = _expand_answer_hits(hits[: _answer_context_limit(payload.top_k)])
-    assessment = _assess_evidence(question, answer_hits, source_scope)
+    assessment = _assess_evidence(retrieval_question, answer_hits, source_scope)
     sources = [
         {
             "citation": f"S{index}",
@@ -1589,7 +2209,7 @@ def ask(payload: AskRequest) -> Dict[str, Any]:
         answer = extractive_answer(question=question, sources=sources, answer_mode=answer_mode)
     else:
         answer = rag_engine.generate_answer(question=question, sources=sources, answer_mode=answer_mode)
-    return {
+    response = {
         "answer": answer,
         "sources": sources,
         "confidence": assessment["confidence"],
@@ -1600,6 +2220,31 @@ def ask(payload: AskRequest) -> Dict[str, Any]:
         "answer_mode": answer_mode,
         "trust_mode": payload.trust_mode,
     }
+    if conversation is not None:
+        with index_lock:
+            stored = _find_conversation(str(conversation.get("session_id")))
+            if stored is not None:
+                stored["messages"].append(_serialize_conversation_message(role="user", text=question))
+                stored["messages"].append(
+                    _serialize_conversation_message(
+                        role="assistant",
+                        text=answer,
+                        answer_mode=answer_mode,
+                        sources=sources,
+                        confidence=float(assessment["confidence"]),
+                        confidence_label=str(assessment["confidence_label"]),
+                        evidence_status=str(assessment["evidence_status"]),
+                        follow_up_question=str(assessment["follow_up_question"]),
+                        used_scope=source_scope,
+                        trust_mode=payload.trust_mode,
+                    )
+                )
+                if str(stored.get("title") or "New chat") == "New chat":
+                    stored["title"] = _conversation_title(question)
+                stored["updated_at"] = utc_now_iso()
+                _save_conversations()
+        response["session_id"] = str(conversation.get("session_id"))
+    return response
 
 
 @app.get("/graph")

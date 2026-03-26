@@ -112,11 +112,36 @@ class ExtractiveAnswerTests(unittest.TestCase):
             else:
                 os.environ["LOCALMIND_LLM_PROVIDER"] = original_provider
 
-    def test_local_answer_without_citations_gets_grounding_appendix(self) -> None:
+    def test_rag_engine_defaults_to_local_provider(self) -> None:
+        original_provider = os.environ.get("LOCALMIND_LLM_PROVIDER")
+        original_key = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ.pop("LOCALMIND_LLM_PROVIDER", None)
+            os.environ["OPENAI_API_KEY"] = "test-key"
+            engine = RAGEngine(Path("missing-models"))
+
+            self.assertEqual(engine.mode, "extractive-fallback")
+            self.assertEqual(engine.model_name, "extractive-fallback")
+        finally:
+            if original_provider is None:
+                os.environ.pop("LOCALMIND_LLM_PROVIDER", None)
+            else:
+                os.environ["LOCALMIND_LLM_PROVIDER"] = original_provider
+
+            if original_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = original_key
+
+    def test_supported_local_answer_without_citations_gets_grounding_appendix(self) -> None:
         engine = RAGEngine(Path("missing-models"))
         engine.mode = "llama-cpp"
         engine._llama = object()
-        engine._call_local_chat = lambda _question, _sources, _answer_mode="answer": "TCP uses a congestion window to control sending rate."
+        engine._call_local_chat = (
+            lambda _question, _sources, _answer_mode="answer": (
+                "TCP congestion control adjusts the congestion window based on perceived network conditions."
+            )
+        )
 
         answer = engine.generate_answer(
             "Explain TCP congestion control",
@@ -134,6 +159,33 @@ class ExtractiveAnswerTests(unittest.TestCase):
         )
 
         self.assertIn("Key evidence:", answer)
+        self.assertIn("network.txt", answer)
+
+    def test_unsupported_local_answer_falls_back_to_extractive_answer(self) -> None:
+        engine = RAGEngine(Path("missing-models"))
+        engine.mode = "llama-cpp"
+        engine._llama = object()
+        engine._call_local_chat = (
+            lambda _question, _sources, _answer_mode="answer": "TCP uses a congestion window to control sending rate."
+        )
+
+        answer = engine.generate_answer(
+            "Explain TCP congestion control",
+            [
+                {
+                    "source_file": "network.txt",
+                    "page_number": 1,
+                    "text": (
+                        "TCP congestion control adjusts the congestion window based on perceived network conditions. "
+                        "Slow start increases the window rapidly until packet loss or a threshold is reached."
+                    ),
+                    "chunk_id": "chunk_1",
+                }
+            ],
+        )
+
+        self.assertNotIn("Key evidence:", answer)
+        self.assertIn("Supporting points:", answer)
         self.assertIn("network.txt", answer)
 
 

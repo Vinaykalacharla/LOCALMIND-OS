@@ -43,6 +43,8 @@ QUESTION_STOPWORDS = {
     "with",
 }
 
+MODEL_SIZE_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)b(?![a-z])", re.IGNORECASE)
+
 
 def _normalize_answer_mode(answer_mode: str) -> str:
     allowed = {"answer", "study_guide", "flashcards", "quiz"}
@@ -223,6 +225,57 @@ def _has_citation(text: str) -> bool:
     return bool(re.search(r"\[[^\]]+\]", text))
 
 
+def _evidence_terms(sources: Sequence[Dict[str, str]]) -> set[str]:
+    terms: set[str] = set()
+    for source in sources:
+        for token in _tokenize(source.get("text", "")):
+            if len(token) > 2 and token not in QUESTION_STOPWORDS:
+                terms.add(token)
+    return terms
+
+
+def _generated_answer_supported(answer: str, question: str, sources: Sequence[Dict[str, str]], answer_mode: str) -> bool:
+    if answer_mode in {"quiz", "flashcards"}:
+        return True
+
+    evidence_terms = _evidence_terms(sources)
+    question_terms = _question_terms(question)
+    content_sentences: List[str] = []
+    for sentence in _extract_sentences(answer):
+        lowered = sentence.lower().strip()
+        if not lowered:
+            continue
+        if lowered.startswith("key evidence"):
+            continue
+        content_sentences.append(sentence)
+
+    if not content_sentences:
+        return False
+
+    supported = 0
+    checked = 0
+    for sentence in content_sentences:
+        sentence_terms = {
+            token
+            for token in _tokenize(re.sub(r"\[s\d+\]", " ", sentence.lower()))
+            if len(token) > 2 and token not in QUESTION_STOPWORDS and not re.fullmatch(r"s\d+", token)
+        }
+        if not sentence_terms:
+            continue
+        checked += 1
+        novel_terms = sentence_terms - question_terms
+        if not novel_terms:
+            supported += 1
+            continue
+        overlap = len([term for term in novel_terms if term in evidence_terms]) / max(1, len(novel_terms))
+        if overlap >= 0.5:
+            supported += 1
+
+    if checked == 0:
+        return False
+    return (supported / checked) >= 0.7
+
+
 def _grounding_appendix(question: str, sources: Sequence[Dict[str, str]], limit: int = 2) -> str:
     chosen = _top_unique_sentences(question, sources, limit=limit)
     if not chosen:
@@ -239,6 +292,38 @@ def _flashcard_prompt(sentence: str, fallback_index: int) -> str:
             if len(subject) >= 4:
                 return f"What should you remember about {subject}?"
     return f"What is one key point to remember from card {fallback_index}?"
+
+
+def _gguf_quality_score(path: Path) -> float:
+    lowered = path.name.lower()
+    score = 0.0
+
+    if "instruct" in lowered or "chat" in lowered:
+        score += 2.5
+    if "q5" in lowered:
+        score += 1.15
+    elif "q4_k_m" in lowered:
+        score += 1.1
+    elif "q4" in lowered:
+        score += 0.9
+    elif "q6" in lowered or "q8" in lowered:
+        score += 0.8
+    elif "q3" in lowered:
+        score += 0.3
+    elif "q2" in lowered:
+        score -= 0.6
+
+    size_match = MODEL_SIZE_RE.search(lowered)
+    if size_match:
+        size_in_billions = float(size_match.group(1))
+        score += min(size_in_billions, 8.0) * 0.35
+        if size_in_billions > 8.5:
+            score -= (size_in_billions - 8.5) * 0.45
+
+    if "qwen" in lowered or "llama" in lowered or "mistral" in lowered:
+        score += 0.2
+
+    return round(score, 4)
 
 
 def extractive_answer(question: str, sources: Sequence[Dict[str, str]], answer_mode: str = "answer") -> str:
@@ -299,23 +384,31 @@ def extractive_answer(question: str, sources: Sequence[Dict[str, str]], answer_m
 
 
 class RAGEngine:
-    def __init__(self, models_dir: Path):
+    def __init__(self, models_dir: Path, *, provider: str | None = None, preferred_local_model: str | None = None):
         self.models_dir = models_dir
         self._llama = None
         self._llama_chat_supported = False
-        self._provider = os.getenv("LOCALMIND_LLM_PROVIDER", "auto").strip().lower() or "auto"
+        self._provider = (provider or os.getenv("LOCALMIND_LLM_PROVIDER", "local")).strip().lower() or "local"
+        self._preferred_local_model = (preferred_local_model or os.getenv("LOCALMIND_LLM_MODEL", "")).strip()
         self._openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self._openai_model = os.getenv("OPENAI_MODEL", "gpt-5.4").strip() or "gpt-5.4"
         self._openai_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.mode = "extractive-fallback"
+        self.model_name = "extractive-fallback"
+        self.last_error = ""
         self._configure_llm()
 
     def _configure_llm(self) -> None:
+        self.last_error = ""
+        self._llama = None
+        self._llama_chat_supported = False
         if self._provider == "openai":
             if self._openai_api_key:
                 self.mode = f"openai:{self._openai_model}"
+                self.model_name = self._openai_model
                 return
             self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
             return
 
         self._load_local_llm()
@@ -324,37 +417,76 @@ class RAGEngine:
 
         if self._provider == "local":
             self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
             return
 
         if self._openai_api_key:
             self.mode = f"openai:{self._openai_model}"
+            self.model_name = self._openai_model
             return
 
+    def _resolve_local_model(self, configured: str) -> Path:
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            local_path = self.models_dir / configured
+            if local_path.exists():
+                candidate = local_path
+        return candidate
+
     def _load_local_llm(self) -> None:
-        gguf_files = sorted(self.models_dir.glob("*.gguf"))
+        configured = self._preferred_local_model.strip()
+        if configured.lower() in {"extractive-fallback", "disabled", "none"}:
+            self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
+            return
+
+        gguf_files: List[Path] = []
+        if configured and configured.lower() != "auto":
+            configured_path = self._resolve_local_model(configured)
+            if configured_path.exists() and configured_path.suffix.lower() == ".gguf":
+                gguf_files = [configured_path]
+        if not gguf_files:
+            gguf_files = sorted(self.models_dir.glob("*.gguf"), key=_gguf_quality_score, reverse=True)
         if not gguf_files:
             self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
             return
         try:
             from llama_cpp import Llama  # type: ignore
 
-            model_path = str(gguf_files[0])
+            selected_model = gguf_files[0]
+            model_path = str(selected_model)
             kwargs = {
                 "model_path": model_path,
-                "n_ctx": 4096,
+                "n_ctx": int(os.getenv("LOCALMIND_LLM_CONTEXT_SIZE", "4096")),
                 "n_threads": max(1, (os.cpu_count() or 4) // 2),
                 "verbose": False,
                 "n_gpu_layers": 0,
             }
-            if "qwen" in gguf_files[0].name.lower():
+            if "qwen" in selected_model.name.lower():
                 kwargs["chat_format"] = "chatml"
             self._llama = Llama(**kwargs)
             self._llama_chat_supported = hasattr(self._llama, "create_chat_completion")
             self.mode = "llama-cpp"
-        except Exception:
+            self.model_name = selected_model.name
+        except Exception as exc:
             self._llama = None
             self._llama_chat_supported = False
             self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
+            self.last_error = str(exc)
+
+    def reload(self, *, provider: str | None = None, preferred_local_model: str | None = None) -> None:
+        if provider is not None:
+            self._provider = provider.strip().lower() or "local"
+        if preferred_local_model is not None:
+            self._preferred_local_model = preferred_local_model.strip()
+        self.mode = "extractive-fallback"
+        self.model_name = "extractive-fallback"
+        self.last_error = ""
+        self._llama = None
+        self._llama_chat_supported = False
+        self._configure_llm()
 
     def _build_openai_messages(self, question: str, sources: Sequence[Dict[str, str]], answer_mode: str = "answer") -> List[Dict[str, str]]:
         source_blocks: List[str] = []
@@ -456,7 +588,7 @@ class RAGEngine:
                 temperature=0.1,
                 top_p=0.85,
                 repeat_penalty=1.08,
-                max_tokens=420,
+                max_tokens=520,
             )
             choices = response.get("choices") or []
             if not choices:
@@ -478,7 +610,7 @@ class RAGEngine:
         )
         response = self._llama(
             prompt,
-            max_tokens=420,
+            max_tokens=520,
             temperature=0.1,
             top_p=0.85,
             repeat_penalty=1.08,
@@ -515,6 +647,8 @@ class RAGEngine:
                 if text:
                     if text == "Not found in your data.":
                         return text
+                    if answer_mode in {"answer", "study_guide"} and not _generated_answer_supported(text, question, sources, answer_mode):
+                        return extractive_answer(question=question, sources=sources, answer_mode=answer_mode)
                     if not _has_citation(text):
                         appendix = _grounding_appendix(question, sources)
                         if appendix:

@@ -21,9 +21,13 @@ def build_feature_status(
     models_dir: Path,
     *,
     embedding_mode: str,
+    embedding_model: str,
     vector_backend: str,
     graph_mode: str,
+    reranker_mode: str,
+    reranker_model: str,
     llm_mode: str,
+    llm_model: str,
 ) -> List[Dict[str, str]]:
     gguf_files = sorted(p.name for p in models_dir.glob("*.gguf"))
     pdf_backend = detect_pdf_backend()
@@ -36,13 +40,27 @@ def build_feature_status(
             "embeddings",
             "Embeddings",
             "active" if embedding_mode == "sentence-transformers" else "fallback",
-            "SentenceTransformers active." if embedding_mode == "sentence-transformers" else "Install sentence-transformers for semantic embeddings.",
+            (
+                f"SentenceTransformers active: {embedding_model}."
+                if embedding_mode == "sentence-transformers"
+                else "Add a local embedding model under backend/models/embeddings or set LOCALMIND_EMBEDDING_MODEL."
+            ),
         ),
         status_row(
             "vector_index",
             "Vector Index",
             "active" if vector_backend == "faiss" else "fallback",
             "FAISS active." if vector_backend == "faiss" else "Install faiss-cpu for faster vector search.",
+        ),
+        status_row(
+            "reranker",
+            "Reranker",
+            "active" if reranker_mode == "cross-encoder" else "fallback",
+            (
+                f"Local reranker active: {reranker_model}."
+                if reranker_mode == "cross-encoder"
+                else "Add a local reranker under backend/models/rerankers or set LOCALMIND_RERANKER_MODEL."
+            ),
         ),
         status_row(
             "graph",
@@ -66,19 +84,19 @@ def build_feature_status(
 
     if llm_mode.startswith("openai:"):
         model_name = llm_mode.split(":", 1)[1]
-        rows.append(status_row("llm", "Premium LLM", "active", f"OpenAI model active: {model_name}"))
+        rows.append(status_row("llm", "LLM", "active", f"Hosted model active: {model_name}"))
     elif llm_mode == "llama-cpp":
-        rows.append(status_row("llm", "Local LLM", "active", "GGUF model loaded with llama-cpp-python."))
+        rows.append(status_row("llm", "LLM", "active", f"Local GGUF active: {llm_model}."))
     elif gguf_files:
         rows.append(
             status_row(
                 "llm",
-                "Local LLM",
+                "LLM",
                 "fallback",
                 f"Found GGUF model(s): {', '.join(gguf_files[:2])}. Install llama-cpp-python to enable them.",
             )
         )
     else:
-        rows.append(status_row("llm", "Local LLM", "missing", "Add a GGUF model under backend/models and install llama-cpp-python."))
+        rows.append(status_row("llm", "LLM", "missing", "Add a GGUF model under backend/models and install llama-cpp-python."))
 
     return rows

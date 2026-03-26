@@ -79,6 +79,70 @@ export default function DashboardPage() {
         )}
       </section>
 
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+        <div className="shell-panel p-5 sm:p-6">
+          <div className="eyebrow">Offline AI Stack</div>
+          <div className="mt-2 text-2xl font-semibold text-white">Local model and retrieval status</div>
+
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <div className="metric-tile">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">LLM</div>
+              <div className="mt-2 text-sm font-medium text-white">{stats?.llm_model || "Extractive fallback"}</div>
+              <div className="mt-1 text-xs text-zinc-500">{stats?.llm_mode || "unknown"}</div>
+            </div>
+            <div className="metric-tile">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Embeddings</div>
+              <div className="mt-2 text-sm font-medium text-white">{stats?.embedding_model || "Not loaded"}</div>
+              <div className="mt-1 text-xs text-zinc-500">{stats?.embedding_mode || "unknown"}</div>
+            </div>
+            <div className="metric-tile">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Reranker</div>
+              <div className="mt-2 text-sm font-medium text-white">{stats?.reranker_model || "Lexical only"}</div>
+              <div className="mt-1 text-xs text-zinc-500">{stats?.reranker_mode || "disabled"}</div>
+            </div>
+            <div className="metric-tile">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Chunking</div>
+              <div className="mt-2 text-sm font-medium text-white">{stats?.chunking_version || "unknown"}</div>
+              <div className="mt-1 text-xs text-zinc-500">
+                {stats?.reindex_recommended ? "Reindex recommended" : "Index is current"}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3">
+            <Link href="/models" className="btn-primary">
+              Manage models
+            </Link>
+            <Link href="/evaluate" className="btn-secondary">
+              Evaluate stack
+            </Link>
+          </div>
+        </div>
+
+        <div className="shell-panel p-5 sm:p-6">
+          <div className="eyebrow">Capabilities</div>
+          <div className="mt-2 text-2xl font-semibold text-white">What is active right now</div>
+
+          <div className="mt-5 space-y-3">
+            {(stats?.feature_status ?? []).map((feature) => (
+              <div
+                key={feature.id}
+                className="rounded-[16px] border border-white/8 bg-white/[0.02] px-4 py-4"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium text-white">{feature.label}</div>
+                  <span className={feature.status === "active" ? "status-pill" : feature.status === "fallback" ? "status-pill warn" : "status-pill danger"}>
+                    {feature.status}
+                  </span>
+                </div>
+                <div className="mt-2 text-sm leading-6 text-zinc-400">{feature.detail}</div>
+              </div>
+            ))}
+            {!stats?.feature_status?.length ? <div className="text-sm text-zinc-500">Capability data is not available yet.</div> : null}
+          </div>
+        </div>
+      </section>
+
       <section className="grid gap-6 xl:grid-cols-2">
         <div className="shell-panel p-5 sm:p-6">
           <div className="eyebrow">New Capabilities</div>

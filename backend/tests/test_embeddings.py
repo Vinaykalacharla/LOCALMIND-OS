@@ -46,7 +46,7 @@ class EmbeddingServiceTests(unittest.TestCase):
         hashed_signature = service.index_signature()
 
         service.mode = "sentence-transformers"
-        service.model_name = "all-MiniLM-L6-v2"
+        service.model_name = "local-bge-small"
         service._st_model = object()
         transformer_signature = service.index_signature()
 

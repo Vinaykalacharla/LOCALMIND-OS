@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Sequence
 
 
-CHUNKING_VERSION = "structured-v2"
+CHUNKING_VERSION = "structured-v3"
 
 ATX_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
 SETEXT_HEADING_RE = re.compile(r"^\s*(=+|-{3,})\s*$")
@@ -167,19 +167,90 @@ def _render_section_prefix(section_path: Sequence[str]) -> str:
     return f"Section: {' > '.join(section_path)}\n"
 
 
-def _block_to_units(block: StructuredBlock, chunk_size: int) -> List[ChunkSegment]:
+def _tail_overlap_paragraph(text: str, overlap: int) -> str:
+    if overlap <= 0:
+        return ""
+    normalized = _normalize_inline_whitespace(text)
+    if not normalized:
+        return ""
+    if len(normalized) <= overlap:
+        return normalized
+
+    sentences = [part.strip() for part in SENTENCE_SPLIT_RE.split(normalized) if part.strip()]
+    if len(sentences) > 1:
+        chosen: List[str] = []
+        total = 0
+        for sentence in reversed(sentences):
+            addition = len(sentence) + (1 if chosen else 0)
+            if total + addition > overlap:
+                break
+            chosen.insert(0, sentence)
+            total += addition
+        if chosen:
+            return " ".join(chosen)
+
+    words = normalized.split()
+    chosen_words: List[str] = []
+    total = 0
+    for word in reversed(words):
+        addition = len(word) + (1 if chosen_words else 0)
+        if chosen_words and total + addition > overlap:
+            break
+        chosen_words.insert(0, word)
+        total += addition
+    return " ".join(chosen_words)
+
+
+def _tail_overlap_list(text: str, overlap: int) -> str:
+    if overlap <= 0:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    chosen: List[str] = []
+    total = 0
+    for line in reversed(lines):
+        addition = len(line) + (1 if chosen else 0)
+        if total + addition > overlap:
+            break
+        chosen.insert(0, line)
+        total += addition
+    return "\n".join(chosen)
+
+
+def _block_to_units(block: StructuredBlock, chunk_size: int, overlap: int) -> List[ChunkSegment]:
     prefix = _render_section_prefix(block.section_path)
     available = max(80, chunk_size - len(prefix))
 
     if block.block_kind == "list":
         units = _split_list_units(block.text, available)
+        overlap_builder = _tail_overlap_list
+        separator = "\n"
     else:
         units = _split_paragraph_units(block.text, available)
+        overlap_builder = _tail_overlap_paragraph
+        separator = " "
 
     segments: List[ChunkSegment] = []
+    previous_unit = ""
+    overlap_budget = min(overlap, max(60, available // 3))
+
     for unit in units:
-        text = f"{prefix}{unit}" if prefix else unit
+        overlap_prefix = ""
+        if previous_unit and overlap_budget > 0:
+            allowed_prefix = max(0, available - len(unit) - len(separator))
+            if allowed_prefix > 0:
+                overlap_prefix = overlap_builder(previous_unit, min(overlap_budget, allowed_prefix))
+
+        body = unit
+        if overlap_prefix and overlap_prefix != unit:
+            body = f"{overlap_prefix}{separator}{unit}"
+
+        text = f"{prefix}{body}" if prefix else body
         segments.append(ChunkSegment(text=text, section_path=list(block.section_path), block_kind=block.block_kind))
+        previous_unit = unit
+
     return segments
 
 
@@ -275,7 +346,7 @@ def chunk_document(text: str, chunk_size: int = 900, overlap: int = 150) -> List
 
     segments: List[ChunkSegment] = []
     for block in blocks:
-        segments.extend(_block_to_units(block, chunk_size))
+        segments.extend(_block_to_units(block, chunk_size, overlap))
     return segments
 
 

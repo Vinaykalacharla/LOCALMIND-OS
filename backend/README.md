@@ -36,10 +36,11 @@ python -m spacy download en_core_web_sm
 
 Optional models:
 - Place `*.gguf` files in `backend/models` to enable local generation through `llama-cpp-python`.
-- If `sentence-transformers` is installed, the backend will switch from hashed TF-IDF to semantic embeddings automatically.
-- Set `OPENAI_API_KEY` to enable a hosted premium LLM.
-- Optionally set `OPENAI_MODEL` to choose the hosted model. Default: `gpt-5.4`.
-- Optionally set `LOCALMIND_LLM_PROVIDER` to `local`, `openai`, or `auto`. Default: `auto`.
+- Add a local embedding model under `backend/models/embeddings` or set `LOCALMIND_EMBEDDING_MODEL`.
+- Add a local reranker under `backend/models/rerankers` or set `LOCALMIND_RERANKER_MODEL`.
+- Optionally set `LOCALMIND_LLM_MODEL` to choose an exact GGUF file.
+- Optionally set `LOCALMIND_LLM_CONTEXT_SIZE` to increase local context if the machine can handle it.
+- `LOCALMIND_LLM_PROVIDER` now defaults to `local` so the app stays offline-first.
 
 The `/stats` response now exposes active vs fallback capabilities so the frontend can show what is enabled.
 
@@ -54,10 +55,10 @@ Persisted under `backend/data`:
 - `query_log.jsonl`
 
 ## Notes
-- Embeddings: tries `sentence-transformers` first, falls back to TF-IDF.
+- Embeddings: tries local `sentence-transformers` candidates first, falls back to hashed TF-IDF.
 - Vector backend: tries FAISS first, falls back to NumPy similarity if FAISS is unavailable.
-- LLM mode: in `auto`, it prefers local GGUF via `llama-cpp-python`, then OpenAI if configured, then falls back to extractive answer generation.
-- For a truly offline setup, leave `OPENAI_API_KEY` unset and optionally set `LOCALMIND_LLM_PROVIDER=local`.
+- Reranking: can use a local cross-encoder when a reranker model is available; otherwise it stays lexical-only.
+- LLM mode: defaults to local GGUF via `llama-cpp-python`, then falls back to extractive answer generation.
 - Graph: tries spaCy NER/chunks first, falls back to keyword graph extraction.
 - Python 3.14: spaCy graph extraction is disabled automatically because the current spaCy stack is not fully compatible there. Use Python 3.12 or 3.13 for richer graph extraction.
 
@@ -70,9 +71,9 @@ For the current laptop-class setup in this project, keep expectations realistic:
 - If you want answers materially closer to ChatGPT quality while staying offline, the next meaningful step is a stronger local machine, then a `7B` or `8B` instruct model plus better retrieval.
 
 Current quality work in this backend focuses on:
-- paragraph-aware chunking for new ingests
-- hybrid retrieval reranking with lexical matching on top of vector search
-- broader retrieval for answer generation before the local model writes the response
+- structured chunking with heading context plus overlap
+- local vector search plus optional local reranking
+- broader grounded context before the local model writes the response
 
 ## Tests
 

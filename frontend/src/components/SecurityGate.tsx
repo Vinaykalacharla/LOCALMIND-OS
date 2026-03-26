@@ -54,6 +54,11 @@ export default function SecurityGate({ children }: { children: React.ReactNode }
       return;
     }
 
+    if (trimmed.length < 8) {
+      setError("Passphrase must be at least 8 characters");
+      return;
+    }
+
     if (!currentStatus.configured && trimmed !== confirmPassphrase.trim()) {
       setError("Passphrases do not match");
       return;

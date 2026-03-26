@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,17 @@ class FakeEmbeddingService:
 
     def embed_query(self, _query: str):
         return [[1.0]]
+
+    def index_signature(self) -> str:
+        return "hashed-tfidf:2048:test"
+
+    def prepare_runtime(self, _texts) -> None:
+        return None
+
+
+class QueryAwareEmbeddingService(FakeEmbeddingService):
+    def embed_query(self, query: str):
+        return query
 
 
 class FakeVectorIndex:
@@ -88,6 +100,19 @@ class FakeVectorIndexMetadataPreference:
         return [(0, 0.89), (1, 0.84)][:top_k]
 
 
+class FakeVectorIndexQueryVariants:
+    backend_name = "numpy-fallback"
+    size = 2
+
+    def search(self, query_vector, _top_k: int):
+        lowered = str(query_vector).lower()
+        if "from my notes" in lowered:
+            return [(0, 0.72)]
+        if "tcp congestion control" in lowered:
+            return [(1, 0.88), (0, 0.61)]
+        return [(0, 0.5)]
+
+
 class DummySecurityManager:
     configured = False
     unlocked = False
@@ -105,34 +130,87 @@ class DummySecurityManager:
         return payload
 
 
+class DummyRerankerService:
+    mode = "disabled"
+    model_name = "lexical-only"
+
+    def rerank(self, _query, candidates):
+        return list(candidates)
+
+
 class FakeRagEngine:
     def __init__(self) -> None:
         self.calls = []
+        self.mode = "extractive-fallback"
+        self.model_name = "extractive-fallback"
 
     def generate_answer(self, *, question: str, sources, answer_mode: str):
         self.calls.append({"question": question, "sources": sources, "answer_mode": answer_mode})
         return f"mode={answer_mode}"
 
 
-class QueryAwareEmbeddingService:
-    mode = "hashed-tfidf"
-    model_name = "hashed-tfidf-2048"
+class FakeSelectableEmbeddingService(FakeEmbeddingService):
+    def __init__(self, _models_dir=None, preferred_model: str | None = None) -> None:
+        self.preferred_model = (preferred_model or "").strip()
+        self.last_error = ""
+        if self.preferred_model == "embeddings/strong-embed":
+            self.mode = "sentence-transformers"
+            self.model_name = "strong-embed"
+        elif self.preferred_model in {"auto", ""}:
+            self.mode = "sentence-transformers"
+            self.model_name = "auto-embed"
+        elif self.preferred_model == "hashed-tfidf":
+            self.mode = "hashed-tfidf"
+            self.model_name = "hashed-tfidf-2048"
+        else:
+            self.mode = "hashed-tfidf"
+            self.model_name = "hashed-tfidf-2048"
+            self.last_error = "bad embedding"
 
-    def embed_query(self, query: str):
-        return query
+    def index_signature(self) -> str:
+        if self.mode == "sentence-transformers":
+            return f"sentence-transformers:{self.model_name}"
+        return "hashed-tfidf:2048:test"
+
+    def prepare_runtime(self, _texts) -> None:
+        return None
 
 
-class FakeVectorIndexQueryVariants:
-    backend_name = "numpy-fallback"
-    size = 2
+class FakeSelectableRerankerService(DummyRerankerService):
+    def __init__(self, _models_dir=None, preferred_model: str | None = None) -> None:
+        self.preferred_model = (preferred_model or "").strip()
+        self.last_error = ""
+        if self.preferred_model == "rerankers/strong-reranker":
+            self.mode = "cross-encoder"
+            self.model_name = "strong-reranker"
+        elif self.preferred_model in {"auto", "", "disabled"}:
+            self.mode = "disabled"
+            self.model_name = "lexical-only"
+        else:
+            self.mode = "disabled"
+            self.model_name = "lexical-only"
+            self.last_error = "bad reranker"
 
-    def search(self, query_vector, _top_k: int):
-        lowered = str(query_vector).lower()
-        if "from my notes" in lowered:
-            return [(0, 0.72)]
-        if "tcp congestion control" in lowered:
-            return [(1, 0.88), (0, 0.61)]
-        return [(0, 0.5)]
+
+class FakeSelectableRAGEngine(FakeRagEngine):
+    def __init__(self, _models_dir=None, *, provider: str | None = None, preferred_local_model: str | None = None) -> None:
+        super().__init__()
+        self.provider = provider or "local"
+        self.preferred_local_model = (preferred_local_model or "").strip()
+        self.last_error = ""
+        if self.preferred_local_model == "demo.gguf":
+            self.mode = "llama-cpp"
+            self.model_name = "demo.gguf"
+        elif self.preferred_local_model in {"auto", ""}:
+            self.mode = "llama-cpp"
+            self.model_name = "auto.gguf"
+        elif self.preferred_local_model == "extractive-fallback":
+            self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
+        else:
+            self.mode = "extractive-fallback"
+            self.model_name = "extractive-fallback"
+            self.last_error = "bad llm"
 
 
 class MainBehaviorTests(unittest.TestCase):
@@ -141,41 +219,56 @@ class MainBehaviorTests(unittest.TestCase):
         self.original_uploads_dir = main.UPLOADS_DIR
         self.original_demo_data_dir = main.DEMO_DATA_DIR
         self.original_query_log_file = main.QUERY_LOG_FILE
+        self.original_model_settings_file = main.MODEL_SETTINGS_FILE
         self.original_jobs = dict(main.jobs)
         self.original_chunks_store = list(main.chunks_store)
         self.original_chunk_by_id = dict(main.chunk_by_id)
         self.original_index_map = dict(main.index_map)
         self.original_meta = dict(main.meta)
+        self.original_model_settings = dict(main.model_settings)
         self.original_graph_cache = dict(main.graph_cache)
         self.original_retrieval_stats = main.retrieval_stats
         self.original_chunk_sequences = dict(main.chunk_sequences)
         self.original_chunk_sequence_positions = dict(main.chunk_sequence_positions)
         self.original_prepare_index_state = main.prepare_index_state
+        self.original_embedding_service_cls = main.EmbeddingService
         self.original_embedding_service = main.embedding_service
         self.original_vector_index = main.vector_index
+        self.original_reranker_service_cls = main.RerankerService
+        self.original_reranker_service = main.reranker_service
+        self.original_rag_engine_cls = main.RAGEngine
         self.original_rag_engine = main.rag_engine
         self.original_security_manager = main.security_manager
         self.original_ensure_unlocked = main.ensure_unlocked
         main.QUERY_LOG_FILE = Path(self.temp_dir.name) / "query_log.jsonl"
+        main.MODEL_SETTINGS_FILE = Path(self.temp_dir.name) / "model_settings.json"
+        main.model_settings = {"llm": "auto", "embedding": "auto", "reranker": "auto"}
         main.security_manager = DummySecurityManager()
         main.ensure_unlocked = lambda: None
+        main.reranker_service = DummyRerankerService()
 
     def tearDown(self) -> None:
         main.UPLOADS_DIR = self.original_uploads_dir
         main.DEMO_DATA_DIR = self.original_demo_data_dir
         main.QUERY_LOG_FILE = self.original_query_log_file
+        main.MODEL_SETTINGS_FILE = self.original_model_settings_file
         main.jobs = self.original_jobs
         main.chunks_store = self.original_chunks_store
         main.chunk_by_id = self.original_chunk_by_id
         main.index_map = self.original_index_map
         main.meta = self.original_meta
+        main.model_settings = self.original_model_settings
         main.graph_cache = self.original_graph_cache
         main.retrieval_stats = self.original_retrieval_stats
         main.chunk_sequences = self.original_chunk_sequences
         main.chunk_sequence_positions = self.original_chunk_sequence_positions
         main.prepare_index_state = self.original_prepare_index_state
+        main.EmbeddingService = self.original_embedding_service_cls
         main.embedding_service = self.original_embedding_service
         main.vector_index = self.original_vector_index
+        main.RerankerService = self.original_reranker_service_cls
+        main.reranker_service = self.original_reranker_service
+        main.RAGEngine = self.original_rag_engine_cls
         main.rag_engine = self.original_rag_engine
         main.security_manager = self.original_security_manager
         main.ensure_unlocked = self.original_ensure_unlocked
@@ -214,6 +307,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_alpha": chunk}
         main.index_map = {"0": "chunk_alpha"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndex()
 
@@ -248,6 +342,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk_a, chunk_a, chunk_b, chunk_c]
         main.chunk_by_id = {"chunk_a": chunk_a, "chunk_b": chunk_b, "chunk_c": chunk_c}
         main.index_map = {"0": "chunk_a", "1": "chunk_a", "2": "chunk_b", "3": "chunk_c"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = duplicate_index
 
@@ -275,6 +370,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk_generic, chunk_exact]
         main.chunk_by_id = {"chunk_generic": chunk_generic, "chunk_exact": chunk_exact}
         main.index_map = {"0": "chunk_generic", "1": "chunk_exact"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndexLexicalPreference()
 
@@ -295,6 +391,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_irrelevant": chunk}
         main.index_map = {"0": "chunk_irrelevant"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndexZeroSimilarity()
 
@@ -320,6 +417,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk_a, chunk_b]
         main.chunk_by_id = {"chunk_a": chunk_a, "chunk_b": chunk_b}
         main.index_map = {"0": "chunk_a", "1": "chunk_b"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndexLexicalPreference()
 
@@ -346,6 +444,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk_generic, chunk_exact]
         main.chunk_by_id = {"chunk_generic": chunk_generic, "chunk_exact": chunk_exact}
         main.index_map = {"0": "chunk_generic", "1": "chunk_exact"}
+        main.refresh_memory_maps()
         main.embedding_service = QueryAwareEmbeddingService()
         main.vector_index = FakeVectorIndexQueryVariants()
 
@@ -490,6 +589,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_a": chunk}
         main.index_map = {"0": "chunk_a"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndexLowConfidence()
         main.rag_engine = fake_rag
@@ -512,6 +612,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_a": chunk}
         main.index_map = {"0": "chunk_a"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndex()
         main.rag_engine = fake_rag
@@ -534,6 +635,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_a": chunk}
         main.index_map = {"0": "chunk_a"}
+        main.refresh_memory_maps()
         main.embedding_service = FakeEmbeddingService()
         main.vector_index = FakeVectorIndex()
         main.rag_engine = fake_rag
@@ -576,30 +678,83 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertTrue(response["reindex_recommended"])
         self.assertEqual(response["chunking_version"], "legacy-v1")
 
-    def test_collect_reindex_source_paths_uses_uploads_and_demo_data(self) -> None:
-        with tempfile.TemporaryDirectory() as upload_dir, tempfile.TemporaryDirectory() as demo_dir:
-            upload_path = Path(upload_dir) / "job-a" / "abc"
-            upload_path.mkdir(parents=True, exist_ok=True)
-            stored_upload = upload_path / "notes.txt"
-            stored_upload.write_text("stored upload", encoding="utf-8")
+    def test_stats_reports_reindex_recommended_for_embedding_signature_mismatch(self) -> None:
+        main.chunks_store = [
+            {
+                "chunk_id": "chunk_a",
+                "text": "Alpha",
+                "source_file": "notes.txt",
+                "page_number": None,
+                "chunk_index": 0,
+            }
+        ]
+        main.meta = {"chunking_version": main.CHUNKING_VERSION, "embedding_signature": "sentence-transformers:old-embed"}
+        main.vector_index = FakeVectorIndex()
+        main.embedding_service = FakeEmbeddingService()
 
-            demo_path = Path(demo_dir) / "demo.md"
-            demo_path.write_text("demo file", encoding="utf-8")
+        response = main.stats()
 
-            main.UPLOADS_DIR = Path(upload_dir)
-            main.DEMO_DATA_DIR = Path(demo_dir)
+        self.assertTrue(response["reindex_recommended"])
 
-            paths, missing = main._collect_reindex_source_paths(
-                current_chunks=[
-                    {"source_file": "notes.txt"},
-                    {"source_file": "demo.md"},
-                    {"source_file": "missing.pdf"},
-                ],
-                current_meta={"indexed_files": ["notes.txt", "demo.md", "missing.pdf"]},
+    def test_apply_models_updates_runtime_and_persists_selection(self) -> None:
+        main.EmbeddingService = FakeSelectableEmbeddingService
+        main.RerankerService = FakeSelectableRerankerService
+        main.RAGEngine = FakeSelectableRAGEngine
+        main.chunks_store = [
+            {
+                "chunk_id": "chunk_a",
+                "text": "Alpha beta",
+                "source_file": "notes.txt",
+                "page_number": None,
+                "chunk_index": 0,
+            }
+        ]
+        main.meta = {"chunking_version": main.CHUNKING_VERSION, "embedding_signature": "hashed-tfidf:2048:test"}
+        main.vector_index = FakeVectorIndex()
+
+        response = main.apply_models(
+            main.ModelSettingsRequest(
+                llm="demo.gguf",
+                embedding="embeddings/strong-embed",
+                reranker="rerankers/strong-reranker",
             )
+        )
 
-        self.assertEqual({path.name for path in paths}, {"notes.txt", "demo.md"})
-        self.assertEqual(missing, ["missing.pdf"])
+        self.assertEqual(main.model_settings["llm"], "demo.gguf")
+        self.assertEqual(main.embedding_service.model_name, "strong-embed")
+        self.assertEqual(main.reranker_service.model_name, "strong-reranker")
+        self.assertEqual(main.rag_engine.model_name, "demo.gguf")
+        self.assertEqual(response["validation"]["embedding"]["ok"], True)
+        self.assertTrue(main.MODEL_SETTINGS_FILE.exists())
+        saved = json.loads(main.MODEL_SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(saved["embedding"], "embeddings/strong-embed")
+
+    def test_apply_models_rejects_invalid_selection(self) -> None:
+        main.EmbeddingService = FakeSelectableEmbeddingService
+        main.RerankerService = FakeSelectableRerankerService
+        main.RAGEngine = FakeSelectableRAGEngine
+        main.chunks_store = []
+
+        with self.assertRaises(HTTPException) as context:
+            main.apply_models(main.ModelSettingsRequest(embedding="embeddings/bad-embed"))
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertEqual(main.model_settings["embedding"], "auto")
+
+    def test_validate_models_reports_candidate_without_mutating_runtime(self) -> None:
+        main.EmbeddingService = FakeSelectableEmbeddingService
+        main.RerankerService = FakeSelectableRerankerService
+        main.RAGEngine = FakeSelectableRAGEngine
+        main.embedding_service = FakeSelectableEmbeddingService(preferred_model="hashed-tfidf")
+        main.reranker_service = FakeSelectableRerankerService(preferred_model="disabled")
+        main.rag_engine = FakeSelectableRAGEngine(preferred_local_model="extractive-fallback")
+
+        response = main.validate_models(main.ModelSettingsRequest(embedding="embeddings/strong-embed", llm="demo.gguf"))
+
+        self.assertTrue(response["validation"]["embedding"]["ok"])
+        self.assertEqual(response["embedding"]["selected"], "embeddings/strong-embed")
+        self.assertEqual(main.embedding_service.model_name, "hashed-tfidf-2048")
+        self.assertEqual(main.model_settings["embedding"], "auto")
 
     def test_duplicate_source_file_is_skipped(self) -> None:
         chunk = {
@@ -613,6 +768,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_existing": chunk}
         main.index_map = {"0": "chunk_existing"}
+        main.refresh_memory_maps()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "notes.txt"
@@ -635,6 +791,7 @@ class MainBehaviorTests(unittest.TestCase):
         main.chunks_store = [chunk]
         main.chunk_by_id = {"chunk_existing": chunk}
         main.index_map = {"0": "chunk_existing"}
+        main.refresh_memory_maps()
 
         def fail_prepare(*_args, **_kwargs):
             raise RuntimeError("boom")

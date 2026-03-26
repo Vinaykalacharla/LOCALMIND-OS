@@ -35,6 +35,16 @@ export const navItems: NavItem[] = [
     href: "/graph",
     label: "Graph",
     description: "View relationships"
+  },
+  {
+    href: "/models",
+    label: "Models",
+    description: "Switch and validate local models"
+  },
+  {
+    href: "/evaluate",
+    label: "Evaluate",
+    description: "Measure retrieval and model readiness"
   }
 ];
 
@@ -83,6 +93,22 @@ export function getPageMeta(pathname: string): PageMeta {
       eyebrow: "Topology",
       title: "Explore relationships",
       description: "View how documents, topics, people, and projects connect."
+    };
+  }
+
+  if (pathname.startsWith("/models")) {
+    return {
+      eyebrow: "Model Manager",
+      title: "Control the local model stack",
+      description: "Detect, switch, validate, and reindex local AI models without API keys."
+    };
+  }
+
+  if (pathname.startsWith("/evaluate")) {
+    return {
+      eyebrow: "Evaluation",
+      title: "Measure local AI quality",
+      description: "Check retrieval quality, model readiness, and the current offline stack."
     };
   }
 
