@@ -1,7 +1,7 @@
 {
   "build": {
-    "beforeDevCommand": "npm --prefix ../frontend run dev",
-    "beforeBuildCommand": "npm --prefix ../frontend run build",
+    "beforeDevCommand": "npm --prefix frontend run dev",
+    "beforeBuildCommand": "npm --prefix frontend run build",
     "devPath": "http://localhost:3001",
     "distDir": "../frontend/out"
   },
