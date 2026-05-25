@@ -55,6 +55,16 @@ jobs:
           Expand-Archive -Path "ollama.zip" -DestinationPath "ollama_extracted"
           copy "ollama_extracted/ollama.exe" "src-tauri/bin/ollama-x86_64-pc-windows-msvc.exe"
 
+      - name: download default tauri icons
+        shell: pwsh
+        run: |
+          mkdir src-tauri/icons -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/128x128.png" -OutFile "src-tauri/icons/128x128.png"
+          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/128x128@2x.png" -OutFile "src-tauri/icons/128x128@2x.png"
+          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/32x32.png" -OutFile "src-tauri/icons/32x32.png"
+          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/icon.icns" -OutFile "src-tauri/icons/icon.icns"
+          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/icon.ico" -OutFile "src-tauri/icons/icon.ico"
+
       - name: install frontend dependencies
         run: |
           cd frontend
