@@ -1,0 +1,48 @@
+{
+  "build": {
+    "beforeDevCommand": "npm --prefix ../frontend run dev",
+    "beforeBuildCommand": "npm --prefix ../frontend run build",
+    "devPath": "http://localhost:3001",
+    "distDir": "../frontend/out"
+  },
+  "package": {
+    "productName": "LocalMind OS",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": true,
+      "shell": {
+        "all": false,
+        "open": true
+      }
+    },
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "identifier": "com.localmind.os",
+      "icon": [
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/icon.icns",
+        "icons/icon.ico"
+      ],
+      "externalBin": [
+        "bin/localmind-backend"
+      ]
+    },
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "LocalMind OS",
+        "width": 1280,
+        "height": 820,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  }
+}

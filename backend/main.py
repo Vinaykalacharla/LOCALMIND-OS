@@ -28,9 +28,16 @@ from services.reranker import RerankerService
 from services.security import SecurityError, SecurityManager
 from services.vector_index import VectorIndex
 
+import sys
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-MODELS_DIR = BASE_DIR / "models"
+if getattr(sys, "frozen", False):
+    DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMindOS" / "data"
+else:
+    DATA_DIR = BASE_DIR / "data"
+if getattr(sys, "frozen", False):
+    MODELS_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMindOS" / "models"
+else:
+    MODELS_DIR = BASE_DIR / "models"
 DEMO_DATA_DIR = BASE_DIR / "demo_data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 
@@ -401,6 +408,8 @@ def _model_choice_label(scope: str, choice: str) -> str:
             return "Auto-select best local GGUF"
         if normalized == "extractive-fallback":
             return "Extractive fallback only"
+        if normalized.startswith("ollama/"):
+            return f"Ollama: {normalized[7:]}"
     if scope == "embedding":
         if normalized == "auto":
             return "Auto-select local embedding model"
@@ -431,6 +440,11 @@ def _model_validation(scope: str, requested: str, *, mode: str, model_name: str,
         if normalized == "extractive-fallback":
             ok = mode == "extractive-fallback"
             detail = "Extractive fallback is active." if ok else f"Expected extractive fallback, found {active_label}."
+            return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
+        if normalized.startswith("ollama/"):
+            expected_name = normalized[7:]
+            ok = mode == "ollama" and model_name == expected_name
+            detail = f"Connected to Ollama model {expected_name}." if ok else (last_error or f"Could not connect to Ollama model {expected_name}; active runtime is {active_label}.")
             return {"ok": ok, "detail": detail, "selected": normalized, "active_mode": mode, "active_model": model_name}
         expected_name = Path(normalized).name
         ok = mode == "llama-cpp" and model_name == expected_name
@@ -482,7 +496,17 @@ def _build_runtime_stack(settings: Dict[str, str], rows: Sequence[Dict[str, Any]
     next_embedding = EmbeddingService(MODELS_DIR, preferred_model=settings["embedding"])
     next_embedding.prepare_runtime([str(row.get("text", "")) for row in rows if str(row.get("text", "")).strip()])
     next_reranker = RerankerService(MODELS_DIR, preferred_model=settings["reranker"])
-    next_rag = RAGEngine(MODELS_DIR, provider="local", preferred_local_model=settings["llm"])
+    llm_choice = settings["llm"]
+    if llm_choice.startswith("ollama/"):
+        provider = "ollama"
+        preferred_model = llm_choice[7:]
+    elif llm_choice.startswith("openai:"):
+        provider = "openai"
+        preferred_model = llm_choice[7:]
+    else:
+        provider = "local"
+        preferred_model = llm_choice
+    next_rag = RAGEngine(MODELS_DIR, provider=provider, preferred_local_model=preferred_model)
 
     validation = {
         "llm": _model_validation(
@@ -517,6 +541,26 @@ def _build_runtime_stack(settings: Dict[str, str], rows: Sequence[Dict[str, Any]
     }
 
 
+def _fetch_ollama_models() -> List[Dict[str, str]]:
+    url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/") + "/api/tags"
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            models = data.get("models") or []
+            return [
+                {
+                    "id": f"ollama/{m['name']}",
+                    "label": f"Ollama: {m['name']}",
+                    "detail": f"Run generation offline using Ollama model {m['name']}."
+                }
+                for m in models
+            ]
+    except Exception:
+        return []
+
+
 def _apply_runtime_stack(stack: Dict[str, Any]) -> None:
     global embedding_service, reranker_service, rag_engine, model_settings
     embedding_service = stack["embedding_service"]
@@ -532,10 +576,12 @@ def _model_options() -> Dict[str, List[Dict[str, str]]]:
     embedding_dirs = [path for path in sorted(embedding_root.iterdir()) if path.is_dir()] if embedding_root.exists() else []
     reranker_dirs = [path for path in sorted(reranker_root.iterdir()) if path.is_dir()] if reranker_root.exists() else []
 
+    ollama_models = _fetch_ollama_models()
     return {
         "llm": [
             {"id": "auto", "label": "Auto-select", "detail": "Pick the strongest local GGUF automatically."},
             {"id": "extractive-fallback", "label": "Extractive fallback", "detail": "Disable local generation and answer only from retrieved text."},
+            *ollama_models,
             *[
                 {"id": path.name, "label": path.name, "detail": "GGUF model under backend/models."}
                 for path in llm_files
@@ -2254,3 +2300,12 @@ def graph() -> Dict[str, Any]:
     ensure_unlocked()
     with index_lock:
         return graph_cache
+
+
+if __name__ == "__main__":
+    import argparse
+    import uvicorn
+    parser = argparse.ArgumentParser(description="LocalMind OS API Server")
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the API server on")
+    args = parser.parse_args()
+    uvicorn.run("main:app", host="127.0.0.1", port=args.port, reload=False)

@@ -393,6 +393,7 @@ class RAGEngine:
         self._openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self._openai_model = os.getenv("OPENAI_MODEL", "gpt-5.4").strip() or "gpt-5.4"
         self._openai_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
         self.mode = "extractive-fallback"
         self.model_name = "extractive-fallback"
         self.last_error = ""
@@ -402,6 +403,11 @@ class RAGEngine:
         self.last_error = ""
         self._llama = None
         self._llama_chat_supported = False
+        if self._provider == "ollama":
+            self.mode = "ollama"
+            self.model_name = self._preferred_local_model or "qwen2.5:latest"
+            return
+
         if self._provider == "openai":
             if self._openai_api_key:
                 self.mode = f"openai:{self._openai_model}"
@@ -552,6 +558,39 @@ class RAGEngine:
             return "\n".join(part.strip() for part in parts if part.strip()).strip()
         return ""
 
+    def _call_ollama_chat(self, messages: Sequence[Dict[str, str]]) -> str:
+        payload = json.dumps(
+            {
+                "model": self._preferred_local_model or "qwen2.5:latest",
+                "messages": list(messages),
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                }
+            }
+        ).encode("utf-8")
+        req = request.Request(
+            url=f"{self._ollama_base_url}/api/chat",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=45) as response:
+                raw = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Ollama request failed: {detail or exc.reason}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
+        data = json.loads(raw)
+        message = data.get("message") or {}
+        content = message.get("content", "")
+        return content.strip()
+
     def _call_local_chat(self, question: str, sources: Sequence[Dict[str, str]], answer_mode: str = "answer") -> str:
         if self._llama is None:
             return ""
@@ -640,6 +679,22 @@ class RAGEngine:
                     return text
             except Exception:
                 pass
+
+        if self.mode == "ollama":
+            try:
+                text = self._call_ollama_chat(self._build_openai_messages(question, sources, answer_mode))
+                if text:
+                    if text == "Not found in your data.":
+                        return text
+                    if answer_mode in {"answer", "study_guide"} and not _generated_answer_supported(text, question, sources, answer_mode):
+                        return extractive_answer(question=question, sources=sources, answer_mode=answer_mode)
+                    if not _has_citation(text):
+                        appendix = _grounding_appendix(question, sources)
+                        if appendix:
+                            return f"{text}\n\n{appendix}"
+                    return text
+            except Exception as e:
+                self.last_error = str(e)
 
         if self.mode == "llama-cpp" and self._llama is not None:
             try:

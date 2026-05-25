@@ -1,0 +1,65 @@
+name: "Publish Desktop App Release"
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest]
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: install python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-ai.txt pyinstaller
+
+      - name: build python backend
+        run: |
+          cd backend
+          python build_backend.py
+
+      - name: copy backend to tauri sidecar bin
+        run: |
+          mkdir src-tauri/bin
+          copy backend/dist/localmind-backend.exe src-tauri/bin/localmind-backend-x86_64-pc-windows-msvc.exe
+
+      - name: install frontend dependencies
+        run: |
+          cd frontend
+          npm install
+
+      - name: build tauri application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "LocalMind OS v__VERSION__"
+          releaseBody: "Standalone LocalMind OS desktop installer. Includes support for local Ollama and local vector search."
+          releaseDraft: true
+          prerelease: false
