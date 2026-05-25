@@ -12,14 +12,14 @@ fn main() {
   // Spawn the Ollama server sidecar
   let (mut _ollama_rx, _ollama_child) = tauri::api::process::Command::new_sidecar("ollama")
     .expect("Failed to create ollama sidecar command")
-    .args(["serve"])
+    .args(vec!["serve".to_string()])
     .spawn()
     .expect("Failed to spawn ollama sidecar");
 
   // Spawn the FastAPI backend sidecar
   let (mut _rx, _child) = tauri::api::process::Command::new_sidecar("localmind-backend")
     .expect("Failed to create sidecar command")
-    .args(["--port", &port.to_string()])
+    .args(vec!["--port".to_string(), port.to_string()])
     .spawn()
     .expect("Failed to spawn backend sidecar");
 
