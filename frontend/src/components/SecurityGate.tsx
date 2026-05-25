@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { usePathname } from "next/navigation";
 import { useSecurity } from "@/components/SecurityProvider";
 import { getPageMeta } from "@/lib/navigation";
+import ModelGate from "@/components/ModelGate";
 
 export default function SecurityGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -41,7 +42,7 @@ export default function SecurityGate({ children }: { children: React.ReactNode }
   }
 
   if (status.configured && status.unlocked) {
-    return <>{children}</>;
+    return <ModelGate>{children}</ModelGate>;
   }
 
   const currentStatus = status;

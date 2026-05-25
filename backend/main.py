@@ -2295,6 +2295,26 @@ def ask(payload: AskRequest) -> Dict[str, Any]:
     return response
 
 
+@app.post("/models/pull")
+def pull_model(payload: ModelSettingsRequest):
+    from fastapi.responses import StreamingResponse
+    model_name = payload.llm or "qwen2.5:1.5b"
+    url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/") + "/api/pull"
+    
+    def generator():
+        try:
+            import urllib.request
+            req_payload = json.dumps({"name": model_name, "stream": True}).encode("utf-8")
+            req = urllib.request.Request(url, data=req_payload, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=180) as response:
+                for line in response:
+                    yield line
+        except Exception as exc:
+            yield json.dumps({"error": str(exc)}).encode("utf-8") + b"\n"
+            
+    return StreamingResponse(generator(), media_type="application/x-ndjson")
+
+
 @app.get("/graph")
 def graph() -> Dict[str, Any]:
     ensure_unlocked()

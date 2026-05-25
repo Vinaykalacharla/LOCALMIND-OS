@@ -9,6 +9,13 @@ fn main() {
   // Pick an unused port for our FastAPI backend
   let port = portpicker::pick_unused_port().unwrap_or(8000);
 
+  // Spawn the Ollama server sidecar
+  let (mut _ollama_rx, _ollama_child) = tauri::api::process::Command::new_sidecar("ollama")
+    .expect("Failed to create ollama sidecar command")
+    .args(["serve"])
+    .spawn()
+    .expect("Failed to spawn ollama sidecar");
+
   // Spawn the FastAPI backend sidecar
   let (mut _rx, _child) = tauri::api::process::Command::new_sidecar("localmind-backend")
     .expect("Failed to create sidecar command")

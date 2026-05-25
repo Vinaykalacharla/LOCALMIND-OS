@@ -29,7 +29,8 @@
         "icons/icon.ico"
       ],
       "externalBin": [
-        "bin/localmind-backend"
+        "bin/localmind-backend",
+        "bin/ollama"
       ]
     },
     "security": {
