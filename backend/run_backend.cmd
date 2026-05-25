@@ -13,6 +13,6 @@ if not exist "%PY_EXE%" (
   exit /b 1
 )
 
-"%PY_EXE%" -m uvicorn main:app --host 0.0.0.0 --port 8000 1>>"%LOG_OUT%" 2>>"%LOG_ERR%"
+"%PY_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000 1>>"%LOG_OUT%" 2>>"%LOG_ERR%"
 
 endlocal

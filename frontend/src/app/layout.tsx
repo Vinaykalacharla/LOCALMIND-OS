@@ -8,7 +8,10 @@ import "@/styles/globals.css";
 
 export const metadata: Metadata = {
   title: "LocalMind OS",
-  description: "Personal Offline AI Brain"
+  description: "Personal Offline AI Brain",
+  icons: {
+    icon: "/favicon.svg"
+  }
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

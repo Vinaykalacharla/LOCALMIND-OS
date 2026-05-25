@@ -14,8 +14,7 @@ __pycache__/
 # Backend runtime
 backend/.venv/
 backend/.venv313/
-backend/server.out.log
-backend/server.err.log
+backend/*.log
 backend/data/*
 !backend/data/README.md
 backend/models/*.gguf
@@ -24,8 +23,7 @@ backend/models/*.gguf
 # Frontend runtime
 frontend/node_modules/
 frontend/.next/
-frontend/server.out.log
-frontend/server.err.log
+frontend/*.log
 frontend/tsconfig.tsbuildinfo
 
 # Temporary / local staging

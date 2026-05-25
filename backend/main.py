@@ -51,7 +51,8 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="LocalMind OS API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -121,7 +122,7 @@ graph_cache: Dict[str, List[Dict[str, Any]]] = {"nodes": [], "edges": []}
 retrieval_stats = _empty_retrieval_stats()
 chunk_sequences: Dict[tuple[str, int | None], List[Dict[str, Any]]] = {}
 chunk_sequence_positions: Dict[str, int] = {}
-model_settings: Dict[str, str] = {"llm": "auto", "embedding": "auto", "reranker": "auto"}
+model_settings: Dict[str, str] = {"llm": "extractive-fallback", "embedding": "auto", "reranker": "auto"}
 conversations_store: List[Dict[str, Any]] = []
 
 security_manager = SecurityManager(SECURITY_FILE)
@@ -129,7 +130,8 @@ embedding_service = EmbeddingService(MODELS_DIR)
 vector_index = VectorIndex()
 graph_builder = GraphBuilder()
 reranker_service = RerankerService(MODELS_DIR)
-rag_engine = RAGEngine(MODELS_DIR)
+# Boot in extractive mode so startup does not eagerly load a GGUF model.
+rag_engine = RAGEngine(MODELS_DIR, preferred_local_model="extractive-fallback")
 
 
 SEARCH_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -209,7 +211,7 @@ def _managed_artifact_paths() -> List[Path]:
 
 
 def _default_model_settings() -> Dict[str, str]:
-    return {"llm": "auto", "embedding": "auto", "reranker": "auto"}
+    return {"llm": "extractive-fallback", "embedding": "auto", "reranker": "auto"}
 
 
 def _normalize_model_choice(scope: str, value: str | None) -> str:

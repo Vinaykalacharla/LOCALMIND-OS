@@ -15,6 +15,8 @@ interface SecurityContextValue {
 }
 
 const SecurityContext = createContext<SecurityContextValue | null>(null);
+const STATUS_RETRY_DELAY_MS = 1000;
+const STATUS_RETRY_LIMIT = 12;
 
 export function useSecurity() {
   const ctx = useContext(SecurityContext);
@@ -32,15 +34,23 @@ export default function SecurityProvider({ children }: { children: React.ReactNo
 
   async function refreshStatus() {
     setLoading(true);
-    try {
-      const nextStatus = await getSecurityStatus();
-      setStatus(nextStatus);
-      setError(null);
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Failed to read backend security status");
-    } finally {
-      setLoading(false);
+    let lastError: string | null = null;
+    for (let attempt = 0; attempt < STATUS_RETRY_LIMIT; attempt += 1) {
+      try {
+        const nextStatus = await getSecurityStatus();
+        setStatus(nextStatus);
+        setError(null);
+        setLoading(false);
+        return;
+      } catch (nextError) {
+        lastError = nextError instanceof Error ? nextError.message : "Failed to read backend security status";
+        if (attempt < STATUS_RETRY_LIMIT - 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, STATUS_RETRY_DELAY_MS));
+        }
+      }
     }
+    setError(lastError ?? "Failed to read backend security status");
+    setLoading(false);
   }
 
   useEffect(() => {

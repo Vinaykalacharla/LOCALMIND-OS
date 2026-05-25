@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { ChangeEvent, KeyboardEvent, useId, useRef, useState } from "react";
 
 interface UploadDropzoneProps {
   onFilesSelected: (files: File[]) => void;
@@ -10,14 +10,31 @@ interface UploadDropzoneProps {
 export default function UploadDropzone({ onFilesSelected, disabled }: UploadDropzoneProps) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputId = useId();
 
   function normalize(files: FileList | null) {
     if (!files) return [];
     return Array.from(files).filter((file) => file.size > 0);
   }
 
+  function handleManualSelect(event: ChangeEvent<HTMLInputElement>) {
+    onFilesSelected(normalize(event.target.files));
+    event.target.value = "";
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (disabled) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    inputRef.current?.click();
+  }
+
   return (
     <div
+      role="button"
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled}
+      aria-label="Choose files to upload"
       onDragEnter={(event) => {
         event.preventDefault();
         setDragOver(true);
@@ -36,16 +53,18 @@ export default function UploadDropzone({ onFilesSelected, disabled }: UploadDrop
         if (disabled) return;
         onFilesSelected(normalize(event.dataTransfer.files));
       }}
+      onKeyDown={handleKeyDown}
       className={`shell-panel border-2 border-dashed p-8 text-center transition ${dragOver ? "border-sky-300/30 bg-white/[0.04]" : "border-white/10"}`}
     >
       <input
+        id={inputId}
         ref={inputRef}
         type="file"
-        className="hidden"
+        className="sr-only"
         multiple
         disabled={disabled}
         accept=".pdf,.txt,.md,.json,.py,.js,.ts,.tsx,.jsx,.java,.c,.cpp,.go,.rs,.yaml,.yml"
-        onChange={(event) => onFilesSelected(normalize(event.target.files))}
+        onChange={handleManualSelect}
       />
 
       <div className="eyebrow">Upload</div>
@@ -56,14 +75,13 @@ export default function UploadDropzone({ onFilesSelected, disabled }: UploadDrop
         Add PDFs, notes, markdown, JSON, or code files to your local knowledge base.
       </p>
 
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => inputRef.current?.click()}
-        className="btn-primary mt-6 disabled:cursor-not-allowed disabled:opacity-60"
+      <label
+        htmlFor={inputId}
+        aria-disabled={disabled}
+        className={`btn-primary mt-6 ${disabled ? "pointer-events-none cursor-not-allowed opacity-60" : "cursor-pointer"}`}
       >
         Choose Files
-      </button>
+      </label>
 
       <div className="mt-4 text-xs uppercase tracking-[0.22em] text-zinc-500">
         pdf, txt, md, json, py, js, ts, tsx, jsx, java, c, cpp, go, rs, yaml, yml
