@@ -25,9 +25,12 @@ jobs:
           node-version: 20
 
       - name: setup rust
-        run: |
-          rustup update stable
-          rustup default stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: setup python
         uses: actions/setup-python@v5
@@ -47,20 +50,21 @@ jobs:
 
       - name: copy backend to tauri sidecar bin
         run: |
-          mkdir src-tauri/bin
-          copy backend/dist/localmind-backend.exe src-tauri/bin/localmind-backend-x86_64-pc-windows-msvc.exe
+          New-Item -ItemType Directory -Force -Path src-tauri/bin
+          Copy-Item backend/dist/localmind-backend.exe src-tauri/bin/localmind-backend-x86_64-pc-windows-msvc.exe
+        shell: pwsh
 
       - name: download and embed ollama sidecar
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://github.com/ollama/ollama/releases/download/v0.1.48/ollama-windows-amd64.zip" -OutFile "ollama.zip"
           Expand-Archive -Path "ollama.zip" -DestinationPath "ollama_extracted"
-          copy "ollama_extracted/ollama.exe" "src-tauri/bin/ollama-x86_64-pc-windows-msvc.exe"
+          Copy-Item "ollama_extracted/ollama.exe" "src-tauri/bin/ollama-x86_64-pc-windows-msvc.exe"
 
       - name: download default tauri icons
         shell: pwsh
         run: |
-          mkdir src-tauri/icons -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path src-tauri/icons
           Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/128x128.png" -OutFile "src-tauri/icons/128x128.png"
           Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/128x128@2x.png" -OutFile "src-tauri/icons/128x128@2x.png"
           Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/32x32.png" -OutFile "src-tauri/icons/32x32.png"

@@ -68,8 +68,13 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="LocalMind OS API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$",
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "tauri://localhost",
+        "https://tauri.localhost",
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|tauri\.localhost)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

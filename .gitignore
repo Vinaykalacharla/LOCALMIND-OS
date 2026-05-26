@@ -32,3 +32,20 @@ __remote_inspect/
 
 # Local backup snapshots
 backend/data_reset_backup_*/
+
+# PyInstaller build artifacts
+backend/build/
+backend/dist/
+backend/*.spec
+
+# Tauri build artifacts
+src-tauri/target/
+src-tauri/bin/
+src-tauri/icons/
+
+# Downloaded dependencies
+ollama.zip
+ollama_extracted/
+
+# Misc
+.sixth/
