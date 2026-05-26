@@ -27,15 +27,12 @@ fn main() {
     .setup(move |app| {
       let main_window = app.get_window("main").unwrap();
       
-      // Construct the URL with the dynamic API port
-      #[cfg(feature = "custom-protocol")]
-      let start_url = format!("tauri://localhost/?api_port={}", port);
-      
-      #[cfg(not(feature = "custom-protocol"))]
-      let start_url = format!("http://localhost:3001/?api_port={}", port);
-
-      println!("Navigating to: {}", start_url);
-      let _ = main_window.eval(&format!("window.location.replace('{}')", start_url));
+      // Inject the dynamic API port into the frontend
+      let eval_script = format!(
+        "window.__localmind_port = '{0}'; window.localStorage.setItem('localmind_api_port', '{0}');",
+        port
+      );
+      let _ = main_window.eval(&eval_script);
 
       Ok(())
     })

@@ -2335,7 +2335,9 @@ def graph() -> Dict[str, Any]:
 if __name__ == "__main__":
     import argparse
     import uvicorn
+    import multiprocessing
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="LocalMind OS API Server")
     parser.add_argument("--port", type=int, default=8000, help="Port to run the API server on")
     args = parser.parse_args()
-    uvicorn.run("main:app", host="127.0.0.1", port=args.port, reload=False, use_colors=False)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, reload=False, use_colors=False)

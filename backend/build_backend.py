@@ -17,7 +17,6 @@ def build():
         "pyinstaller",
         "--name=localmind-backend",
         "--onefile",
-        "--noconsole",
         "--add-data=demo_data;demo_data",
         # hidden imports for libraries that are loaded dynamically (e.g., Uvicorn modules)
         "--hidden-import=uvicorn.logging",
