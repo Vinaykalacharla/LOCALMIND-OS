@@ -25,17 +25,23 @@ fn main() {
 
   tauri::Builder::default()
     .setup(move |app| {
-      let main_window = app.get_window("main").unwrap();
-      
-      // Construct the URL with the dynamic API port
-      #[cfg(feature = "custom-protocol")]
-      let start_url = format!("tauri://localhost/?api_port={}", port);
-      
-      #[cfg(not(feature = "custom-protocol"))]
-      let start_url = format!("http://localhost:3001/?api_port={}", port);
+      let window_url = if cfg!(feature = "custom-protocol") {
+        tauri::WindowUrl::App("index.html".into())
+      } else {
+        tauri::WindowUrl::External("http://localhost:3001".parse().unwrap())
+      };
 
-      println!("Navigating to: {}", start_url);
-      let _ = main_window.eval(&format!("window.location.replace('{}')", start_url));
+      let _main_window = tauri::WindowBuilder::new(
+        app,
+        "main",
+        window_url,
+      )
+      .title("LocalMind OS")
+      .inner_size(1280.0, 820.0)
+      .resizable(true)
+      .initialization_script(&format!("window.__localmind_port = {};", port))
+      .build()
+      .expect("failed to build window");
 
       Ok(())
     })

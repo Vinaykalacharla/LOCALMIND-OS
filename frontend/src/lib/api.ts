@@ -251,10 +251,11 @@ export interface GraphResponse {
 let API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 if (typeof window !== "undefined") {
   const urlParams = new URLSearchParams(window.location.search);
-  const customPort = urlParams.get("api_port");
+  const injectedPort = (window as any).__localmind_port;
+  const customPort = urlParams.get("api_port") || injectedPort;
   if (customPort) {
     API_BASE = `http://127.0.0.1:${customPort}`;
-    window.localStorage.setItem("localmind_api_port", customPort);
+    window.localStorage.setItem("localmind_api_port", String(customPort));
   } else {
     const storedPort = window.localStorage.getItem("localmind_api_port");
     if (storedPort) {
