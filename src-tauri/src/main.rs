@@ -27,9 +27,9 @@ fn main() {
     .setup(move |app| {
       let main_window = app.get_window("main").unwrap();
       
-      // Inject the dynamic API port into the frontend
+      // Safely reload the page with the correct API port in the query string
       let eval_script = format!(
-        "window.__localmind_port = '{0}'; window.localStorage.setItem('localmind_api_port', '{0}');",
+        "if (!window.location.search.includes('api_port=')) {{ window.location.replace(window.location.origin + window.location.pathname + '?api_port={0}'); }}",
         port
       );
       let _ = main_window.eval(&eval_script);
