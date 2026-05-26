@@ -29,6 +29,16 @@ from services.security import SecurityError, SecurityManager
 from services.vector_index import VectorIndex
 
 import sys
+if sys.stdout is None:
+    try:
+        sys.stdout = open(os.devnull, "w")
+    except Exception:
+        pass
+if sys.stderr is None:
+    try:
+        sys.stderr = open(os.devnull, "w")
+    except Exception:
+        pass
 BASE_DIR = Path(__file__).resolve().parent
 if getattr(sys, "frozen", False):
     DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMindOS" / "data"
@@ -2328,4 +2338,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LocalMind OS API Server")
     parser.add_argument("--port", type=int, default=8000, help="Port to run the API server on")
     args = parser.parse_args()
-    uvicorn.run("main:app", host="127.0.0.1", port=args.port, reload=False)
+    uvicorn.run("main:app", host="127.0.0.1", port=args.port, reload=False, use_colors=False)
