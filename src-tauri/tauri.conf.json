@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "LocalMind OS",
-    "version": "1.1.6"
+    "version": "1.1.7"
   },
   "tauri": {
     "allowlist": {
@@ -36,6 +36,16 @@
     "security": {
       "csp": null
     },
-    "windows": []
+    "windows": [
+      {
+        "label": "main",
+        "title": "LocalMind OS",
+        "width": 1280,
+        "height": 820,
+        "resizable": true,
+        "fullscreen": false,
+        "url": "index.html"
+      }
+    ]
   }
 }
