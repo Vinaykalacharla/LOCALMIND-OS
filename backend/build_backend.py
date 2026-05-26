@@ -32,6 +32,7 @@ def build():
         "--hidden-import=numpy",
         "--hidden-import=faiss",
         "--hidden-import=sentence_transformers",
+        "--collect-all=cryptography",
         "main.py"
     ]
     
