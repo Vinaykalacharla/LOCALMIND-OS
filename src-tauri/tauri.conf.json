@@ -38,11 +38,13 @@
     },
     "windows": [
       {
+        "label": "main",
         "title": "LocalMind OS",
         "width": 1280,
         "height": 820,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "url": "index.html"
       }
     ]
   }

@@ -29,7 +29,7 @@ fn main() {
       
       // Construct the URL with the dynamic API port
       #[cfg(feature = "custom-protocol")]
-      let start_url = format!("tauri://localhost/index.html?api_port={}", port);
+      let start_url = format!("tauri://localhost/?api_port={}", port);
       
       #[cfg(not(feature = "custom-protocol"))]
       let start_url = format!("http://localhost:3001/?api_port={}", port);
