@@ -28,12 +28,14 @@
 
 html {
   min-height: 100%;
+  width: 100%;
   margin: 0;
   background: var(--bg-base);
 }
 
 body {
   min-height: 100%;
+  width: 100%;
   margin: 0;
   background:
     radial-gradient(circle at top, rgba(119, 167, 255, 0.08), transparent 22%),
@@ -41,6 +43,19 @@ body {
   color: var(--text-main);
   font-family: "Aptos", "Segoe UI Variable Text", "Segoe UI", sans-serif;
   overflow-x: hidden;
+}
+
+img,
+svg,
+video,
+canvas {
+  max-width: 100%;
+}
+
+pre,
+code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 ::selection {
@@ -75,7 +90,7 @@ a {
   h3,
   h4 {
     font-family: "Aptos Display", "Aptos", "Segoe UI Variable Display", "Segoe UI", sans-serif;
-    letter-spacing: -0.03em;
+    letter-spacing: 0;
   }
 }
 
@@ -85,33 +100,39 @@ a {
   }
 
   .shell-panel {
-    @apply rounded-[18px] border;
+    @apply min-w-0 rounded-[18px] border;
     border-color: var(--line);
     background: var(--panel-main);
     box-shadow: var(--shadow-panel);
+    overflow-wrap: anywhere;
   }
 
   .shell-panel-muted {
-    @apply rounded-[16px] border;
+    @apply min-w-0 rounded-[16px] border;
     border-color: var(--line);
     background: var(--panel-muted);
+    overflow-wrap: anywhere;
   }
 
   .shell-panel-soft {
-    @apply rounded-[14px] border;
+    @apply min-w-0 rounded-[14px] border;
     border-color: rgba(255, 255, 255, 0.06);
     background: var(--panel-soft);
+    overflow-wrap: anywhere;
   }
 
   .eyebrow {
     @apply text-[11px] font-medium uppercase tracking-[0.24em];
     color: var(--text-muted);
+    overflow-wrap: anywhere;
   }
 
   .btn-primary {
     @apply inline-flex items-center justify-center rounded-[12px] px-4 py-2.5 text-sm font-semibold transition;
     background: linear-gradient(180deg, #87b4ff 0%, #6f9fff 100%);
     color: #07101f;
+    max-width: 100%;
+    white-space: normal;
   }
 
   .btn-primary:hover {
@@ -123,6 +144,8 @@ a {
     border-color: var(--line-strong);
     background: rgba(255, 255, 255, 0.02);
     color: var(--text-soft);
+    max-width: 100%;
+    white-space: normal;
   }
 
   .btn-secondary:hover {
@@ -131,9 +154,10 @@ a {
   }
 
   .metric-tile {
-    @apply rounded-[14px] border p-4;
+    @apply min-w-0 rounded-[14px] border p-4;
     border-color: rgba(255, 255, 255, 0.06);
     background: rgba(255, 255, 255, 0.02);
+    overflow-wrap: anywhere;
   }
 
   .tag {
@@ -141,6 +165,9 @@ a {
     border-color: rgba(255, 255, 255, 0.09);
     background: rgba(255, 255, 255, 0.025);
     color: var(--text-soft);
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .status-pill {
@@ -148,6 +175,8 @@ a {
     border-color: rgba(255, 255, 255, 0.09);
     background: rgba(255, 255, 255, 0.025);
     color: var(--text-soft);
+    max-width: 100%;
+    white-space: normal;
   }
 
   .status-pill::before {
@@ -170,6 +199,7 @@ a {
     @apply w-full rounded-[12px] border px-4 py-3 text-sm text-white outline-none transition;
     border-color: rgba(255, 255, 255, 0.1);
     background: rgba(255, 255, 255, 0.025);
+    min-width: 0;
   }
 
   .input-shell:focus {
@@ -186,6 +216,22 @@ a {
 
   .animate-rise {
     animation: rise-in 0.28s ease both;
+  }
+}
+
+@media (max-width: 640px) {
+  main {
+    width: 100%;
+  }
+
+  .shell-panel,
+  .shell-panel-muted,
+  .shell-panel-soft {
+    border-radius: 14px;
+  }
+
+  .metric-tile {
+    padding: 0.875rem;
   }
 }
 

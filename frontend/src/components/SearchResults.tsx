@@ -19,7 +19,7 @@ export default function SearchResults({ results, onOpenSource }: SearchResultsPr
       {results.map((item, index) => (
         <div key={item.chunk_id} className="shell-panel p-5 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
+            <div className="min-w-0">
               <div className="eyebrow">Result {index + 1}</div>
               <div className="mt-2 text-lg font-semibold text-white">
                 {item.source_file}
