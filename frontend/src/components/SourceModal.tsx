@@ -9,13 +9,13 @@ export default function SourceModal({ item, onClose }: SourceModalProps) {
   if (!item) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm sm:p-4" onClick={onClose}>
       <div
-        className="shell-panel max-h-[85vh] w-full max-w-3xl overflow-auto p-6"
+        className="shell-panel max-h-[85vh] w-full max-w-3xl overflow-auto p-4 sm:p-6"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mb-4 flex items-start justify-between gap-4">
-          <div>
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
             <div className="eyebrow">Source Preview</div>
             <h3 className="mt-2 text-xl font-semibold text-white">
               {item.source_file}
@@ -39,7 +39,7 @@ export default function SourceModal({ item, onClose }: SourceModalProps) {
           <div className="mb-4 text-xs uppercase tracking-[0.18em] text-zinc-500">{item.section_path.join(" > ")}</div>
         ) : null}
 
-        <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+        <div className="rounded-[18px] border border-white/10 bg-black/20 p-4 sm:rounded-[24px]">
           <pre className="whitespace-pre-wrap text-sm leading-7 text-zinc-200">{item.text || item.preview}</pre>
         </div>
       </div>

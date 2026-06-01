@@ -285,12 +285,12 @@ export default function ChatUI() {
                         : "border-white/8 bg-white/[0.02] hover:bg-white/[0.04]"
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="text-sm font-medium text-white">{item.source_file}</div>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 text-sm font-medium text-white">{item.source_file}</div>
                       <div className="tag">{item.kind}</div>
                     </div>
                     <div className="mt-2 text-xs text-zinc-400">
-                      {item.chunks} chunks{item.pages ? ` • ${item.pages} pages` : ""}
+                      {item.chunks} chunks{item.pages ? ` | ${item.pages} pages` : ""}
                     </div>
                   </button>
                 );
@@ -437,7 +437,7 @@ export default function ChatUI() {
                               }`}
                             >
                               <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div>
+                                <div className="min-w-0">
                                   <div className="flex flex-wrap items-center gap-2">
                                     <span className="tag">{source.citation}</span>
                                     <span className="text-xs text-zinc-400">
@@ -516,7 +516,7 @@ export default function ChatUI() {
                 {loading ? "Working..." : "Send"}
               </button>
               <div className="rounded-[14px] border border-white/8 bg-white/[0.02] px-4 py-3 text-xs leading-6 text-zinc-400">
-                {answerModeLabel(answerMode)} mode • {topK} source context • {trustMode ? "trust mode on" : "trust mode off"}
+                {answerModeLabel(answerMode)} mode | {topK} source context | {trustMode ? "trust mode on" : "trust mode off"}
               </div>
             </div>
           </div>

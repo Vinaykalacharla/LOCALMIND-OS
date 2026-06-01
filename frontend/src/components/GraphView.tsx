@@ -535,15 +535,15 @@ export default function GraphView({ graph }: GraphViewProps) {
             </div>
           </div>
 
-          <div className="p-4">
-            <div className="relative overflow-hidden rounded-[30px] border border-white/8 bg-[#050c15] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+          <div className="p-3 sm:p-4">
+            <div className="relative overflow-hidden rounded-[20px] border border-white/8 bg-[#050c15] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] sm:rounded-[30px]">
               <div className="pointer-events-none absolute inset-0">
                 <div className="absolute left-[10%] top-[10%] h-48 w-48 rounded-full bg-sky-400/12 blur-3xl" />
                 <div className="absolute right-[12%] top-[18%] h-44 w-44 rounded-full bg-emerald-300/10 blur-3xl" />
                 <div className="absolute bottom-[8%] left-[42%] h-52 w-52 rounded-full bg-amber-300/8 blur-3xl" />
               </div>
 
-              <div className="pointer-events-none absolute left-4 top-4 z-10 flex flex-wrap gap-2">
+              <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 flex flex-wrap gap-2 sm:left-4 sm:right-auto sm:top-4">
                 <div className="rounded-full border border-white/10 bg-black/30 px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] text-zinc-300 backdrop-blur">
                   {selectedNode ? `${selectedNode.label} pinned` : "Auto-selection active"}
                 </div>
@@ -552,7 +552,7 @@ export default function GraphView({ graph }: GraphViewProps) {
                 </div>
               </div>
 
-              <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-3">
+              <div className="pointer-events-none absolute bottom-3 left-3 right-3 z-10 hidden flex-wrap items-center justify-between gap-3 sm:flex">
                 <div className="flex flex-wrap gap-2">
                   {TYPE_ORDER.map((type) => (
                     <div
@@ -569,8 +569,8 @@ export default function GraphView({ graph }: GraphViewProps) {
                 </div>
               </div>
 
-              <div className="overflow-auto p-3">
-                <svg viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`} className="h-[760px] w-full min-w-[980px]">
+              <div className="overflow-auto p-2 sm:p-3">
+                <svg viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`} className="h-[58vh] min-h-[360px] w-full md:h-[760px] md:min-w-[980px]">
               <defs>
                 <linearGradient id="graphBackground" x1="0%" y1="0%" x2="100%" y2="100%">
                   <stop offset="0%" stopColor="#050b14" />

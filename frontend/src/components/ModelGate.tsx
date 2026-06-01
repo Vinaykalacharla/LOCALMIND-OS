@@ -113,7 +113,7 @@ export default function ModelGate({ children }: { children: React.ReactNode }) {
   if (checking) {
     return (
       <div className="flex min-h-[calc(100vh-12rem)] items-center justify-center">
-        <div className="shell-panel w-full max-w-lg p-8 text-center">
+        <div className="shell-panel w-full max-w-lg p-6 text-center sm:p-8">
           <div className="eyebrow">Models</div>
           <div className="mt-3 text-2xl font-semibold text-white">Scanning local model stack</div>
           <div className="mt-3 text-sm leading-7 text-zinc-400">Locating Ollama models...</div>
@@ -129,9 +129,9 @@ export default function ModelGate({ children }: { children: React.ReactNode }) {
   return (
     <div className="mx-auto flex min-h-[calc(100vh-12rem)] max-w-5xl items-center py-8">
       <div className="grid w-full gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-        <div className="shell-panel p-8">
+        <div className="shell-panel p-6 sm:p-8">
           <div className="eyebrow">First-Time Setup</div>
-          <div className="mt-3 font-display text-4xl font-semibold text-white">
+          <div className="mt-3 font-display text-3xl font-semibold text-white sm:text-4xl">
             Download your local AI model
           </div>
           <div className="mt-3 max-w-2xl text-sm leading-7 text-zinc-400">
@@ -143,7 +143,7 @@ export default function ModelGate({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <div className="shell-panel flex flex-col justify-center p-8">
+        <div className="shell-panel flex flex-col justify-center p-6 sm:p-8">
           {!downloading ? (
             <div className="space-y-4">
               <div className="text-center">
