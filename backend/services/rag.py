@@ -356,9 +356,8 @@ def extractive_answer(question: str, sources: Sequence[Dict[str, str]], answer_m
         return f"Quiz:\n" + "\n".join(questions) + "\n\nAnswer key:\n" + "\n".join(answers)
 
     intent = _detect_intent(question)
-    first = _format_with_citation(chosen[0])
-    rest = chosen[1:]
 
+    # For list/compare/plan intents, structured bullets are the right format
     if intent == "compare":
         lines = "\n".join(f"- {_format_with_citation(item)}" for item in chosen[:5])
         return f"Comparison based on your data:\n{lines}"
@@ -371,16 +370,111 @@ def extractive_answer(question: str, sources: Sequence[Dict[str, str]], answer_m
         lines = "\n".join(f"- {_format_with_citation(item)}" for item in chosen[:6])
         return f"Relevant points from your data:\n{lines}"
 
-    if intent == "explain":
-        bullets = "\n".join(f"- {_format_with_citation(item)}" for item in rest[:4])
-        if bullets:
-            return f"{first}\n\nSupporting points:\n{bullets}"
-        return first
+    # For explain/answer intents: produce one fluent paragraph, not bullet points
+    return _synthesize_paragraph_answer(question, chosen, intent)
 
-    bullets = "\n".join(f"- {_format_with_citation(item)}" for item in rest[:4])
-    if bullets:
-        return f"{first}\n\nAdditional context:\n{bullets}"
-    return first
+
+def _synthesize_paragraph_answer(
+    question: str,
+    chosen: List[Dict[str, str | float]],
+    intent: str,
+) -> str:
+    """
+    Combine the top retrieved sentences into a single coherent paragraph.
+    Citations are moved to a clean 'Sources' section at the bottom so the
+    answer reads naturally — like a ChatGPT / Gemini response — instead of
+    being fragmented by inline [source.pdf p.4] markers.
+    """
+    # Sort chosen sentences by their original source order so the paragraph
+    # reads in the natural sequence they appeared in the document.
+    ordered = sorted(
+        chosen[:5],
+        key=lambda item: (int(item.get("source_index", 0)), 0),
+    )
+
+    clean_sentences: List[str] = []
+    seen_labels: List[str] = []
+    for item in ordered:
+        raw = str(item.get("text", "")).strip()
+        if not raw:
+            continue
+        # Remove any inline citation markers already present.
+        clean = re.sub(r"\s*\[[^\]]+\]\s*", " ", raw).strip()
+        if clean:
+            clean_sentences.append(clean)
+        label = str(item.get("label", ""))
+        if label and label not in seen_labels:
+            seen_labels.append(label)
+
+    if not clean_sentences:
+        return "Not found in your data."
+
+    # Build a natural intro sentence based on what the question is asking.
+    intro = _build_intro_sentence(question, intent)
+
+    # Join sentences into one paragraph, ensuring proper sentence ending.
+    paragraph_parts: List[str] = []
+    for sentence in clean_sentences:
+        if sentence and sentence[-1] not in ".!?":
+            sentence += "."
+        paragraph_parts.append(sentence)
+
+    paragraph = " ".join(paragraph_parts)
+
+    # Attach the intro if it adds value.
+    if intro and not paragraph.lower().startswith(intro.lower()[:15]):
+        full_answer = f"{intro} {paragraph}"
+    else:
+        full_answer = paragraph
+
+    # Append a clean Sources section at the bottom.
+    if seen_labels:
+        sources_line = "  |  ".join(seen_labels)
+        full_answer = f"{full_answer}\n\n**Sources:** {sources_line}"
+
+    return full_answer.strip()
+
+
+def _build_intro_sentence(question: str, intent: str) -> str:
+    """
+    Build a short, natural intro sentence that gives the answer context,
+    similar to how ChatGPT or Gemini would start their responses.
+    """
+    lowered = question.strip().lower()
+
+    # "What is X" → "X is ..."
+    match = re.match(r"what\s+is\s+(?:a\s+|an\s+|the\s+)?(.+?)\??$", lowered)
+    if match:
+        topic = match.group(1).strip().rstrip("?")
+        if topic:
+            return f"{topic.capitalize()} is"
+
+    # "What are X" → "X are ..."
+    match = re.match(r"what\s+are\s+(?:the\s+)?(.+?)\??$", lowered)
+    if match:
+        topic = match.group(1).strip().rstrip("?")
+        if topic:
+            return f"{topic.capitalize()} refers to"
+
+    # "Explain X" → "Here is an explanation of X:"
+    match = re.match(r"explain\s+(?:the\s+|a\s+|an\s+)?(.+?)\??$", lowered)
+    if match:
+        topic = match.group(1).strip().rstrip("?")
+        if topic:
+            return f"Here is an explanation of {topic}:"
+
+    # "How does/is X"
+    if lowered.startswith("how"):
+        return "Based on your documents,"
+
+    # "Why is X"
+    if lowered.startswith("why"):
+        return "According to your documents,"
+
+    if intent == "explain":
+        return "Based on your documents,"
+
+    return ""
 
 
 class RAGEngine:

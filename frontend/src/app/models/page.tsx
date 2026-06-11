@@ -9,6 +9,7 @@ import {
   JobStatus,
   ModelGroupState,
   ModelManagerResponse,
+  rebuildKnowledgeBase,
   reindexKnowledgeBase,
   validateModelManagerSettings
 } from "@/lib/api";
@@ -155,6 +156,21 @@ export default function ModelsPage() {
     }
   }
 
+  
+  async function onRebuild() {
+    if (jobId && jobStatus?.state === "processing") return;
+    if (!confirm("This will clear the current index and re-ingest all files from the uploads folder. Continue?")) return;
+    setJobStatus(initialJobStatus);
+    try {
+      const response = await rebuildKnowledgeBase();
+      setJobId(response.job_id);
+      pushToast("info", "Full rebuild started");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to start rebuild";
+      pushToast("error", message);
+    }
+  }
+
   async function onReindex() {
     if (jobId && jobStatus?.state === "processing") return;
     setJobStatus(initialJobStatus);
@@ -209,7 +225,34 @@ export default function ModelsPage() {
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
-        <div className="shell-panel p-5 sm:p-6">
+        
+        {manager?.hardware && (
+          <div className="shell-panel p-5 sm:p-6 mt-6">
+            <div className="eyebrow">Hardware Analysis</div>
+            <div className="mt-2 text-2xl font-semibold text-white">Detected RAM: {manager.hardware.ram_gb} GB</div>
+            <div className="mt-2 text-sm leading-7 text-zinc-400">
+              Based on your system resources ({manager.hardware.tier} tier), here are the best models we recommend running locally via Ollama:
+            </div>
+            <div className="mt-4 space-y-3">
+              {manager.hardware.recommendations.map(rec => (
+                <div key={rec.ollama_id} className={`p-4 rounded-xl border ${rec.recommended ? 'border-sky-500/50 bg-sky-500/10' : 'border-white/8 bg-white/[0.02]'}`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <h4 className="font-semibold text-white">{rec.label}</h4>
+                    {rec.recommended && <span className="status-pill text-sky-200">Recommended</span>}
+                  </div>
+                  <p className="text-sm text-zinc-300">{rec.description}</p>
+                  <div className="mt-2 flex gap-3 text-xs font-medium text-zinc-500">
+                    <span>Size: {rec.size_gb} GB</span>
+                    <span>Quality: {rec.quality}</span>
+                    <span>Speed: {rec.speed}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+          <div className="shell-panel p-5 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="eyebrow">Model Manager</div>
@@ -280,6 +323,33 @@ export default function ModelsPage() {
         </div>
 
         <div className="space-y-6">
+          
+        {manager?.hardware && (
+          <div className="shell-panel p-5 sm:p-6 mt-6">
+            <div className="eyebrow">Hardware Analysis</div>
+            <div className="mt-2 text-2xl font-semibold text-white">Detected RAM: {manager.hardware.ram_gb} GB</div>
+            <div className="mt-2 text-sm leading-7 text-zinc-400">
+              Based on your system resources ({manager.hardware.tier} tier), here are the best models we recommend running locally via Ollama:
+            </div>
+            <div className="mt-4 space-y-3">
+              {manager.hardware.recommendations.map(rec => (
+                <div key={rec.ollama_id} className={`p-4 rounded-xl border ${rec.recommended ? 'border-sky-500/50 bg-sky-500/10' : 'border-white/8 bg-white/[0.02]'}`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <h4 className="font-semibold text-white">{rec.label}</h4>
+                    {rec.recommended && <span className="status-pill text-sky-200">Recommended</span>}
+                  </div>
+                  <p className="text-sm text-zinc-300">{rec.description}</p>
+                  <div className="mt-2 flex gap-3 text-xs font-medium text-zinc-500">
+                    <span>Size: {rec.size_gb} GB</span>
+                    <span>Quality: {rec.quality}</span>
+                    <span>Speed: {rec.speed}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
           <div className="shell-panel p-5 sm:p-6">
             <div className="eyebrow">Paths</div>
             <div className="mt-2 text-2xl font-semibold text-white">Local model roots</div>
@@ -298,6 +368,33 @@ export default function ModelsPage() {
               </div>
             </div>
           </div>
+
+          
+        {manager?.hardware && (
+          <div className="shell-panel p-5 sm:p-6 mt-6">
+            <div className="eyebrow">Hardware Analysis</div>
+            <div className="mt-2 text-2xl font-semibold text-white">Detected RAM: {manager.hardware.ram_gb} GB</div>
+            <div className="mt-2 text-sm leading-7 text-zinc-400">
+              Based on your system resources ({manager.hardware.tier} tier), here are the best models we recommend running locally via Ollama:
+            </div>
+            <div className="mt-4 space-y-3">
+              {manager.hardware.recommendations.map(rec => (
+                <div key={rec.ollama_id} className={`p-4 rounded-xl border ${rec.recommended ? 'border-sky-500/50 bg-sky-500/10' : 'border-white/8 bg-white/[0.02]'}`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <h4 className="font-semibold text-white">{rec.label}</h4>
+                    {rec.recommended && <span className="status-pill text-sky-200">Recommended</span>}
+                  </div>
+                  <p className="text-sm text-zinc-300">{rec.description}</p>
+                  <div className="mt-2 flex gap-3 text-xs font-medium text-zinc-500">
+                    <span>Size: {rec.size_gb} GB</span>
+                    <span>Quality: {rec.quality}</span>
+                    <span>Speed: {rec.speed}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
           <div className="shell-panel p-5 sm:p-6">
             <div className="eyebrow">Reindex</div>

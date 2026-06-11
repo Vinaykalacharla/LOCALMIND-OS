@@ -210,8 +210,28 @@ export interface ModelRoots {
   reranker: string;
 }
 
+
+export interface HardwareRecommendation {
+  ollama_id: string;
+  label: string;
+  size_gb: number;
+  quality: string;
+  speed: string;
+  description: string;
+  recommended: boolean;
+}
+
+export interface HardwareInfo {
+  ram_gb: number;
+  ram_detected: boolean;
+  platform: string;
+  tier: string;
+  recommendations: HardwareRecommendation[];
+}
+
 export interface ModelManagerResponse {
   indexed_chunks: number;
+  hardware: HardwareInfo;
   reindex_recommended: boolean;
   index_embedding_model: string;
   index_embedding_signature: string;
@@ -319,6 +339,61 @@ export async function ingestFiles(files: File[]): Promise<IngestResponse> {
 
 export async function ingestDemoData(): Promise<IngestResponse> {
   return req<IngestResponse>("/ingest_demo", { method: "POST" });
+}
+
+
+export interface Collection {
+  id: string;
+  name: string;
+  files: string[];
+  created_at: string;
+}
+
+export async function getCollections(): Promise<{ collections: Collection[] }> {
+  return req<{ collections: Collection[] }>("/collections");
+}
+
+export async function createCollection(payload: { name: string; files: string[] }): Promise<Collection> {
+  return req<Collection>("/collections", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteCollection(id: string): Promise<{ ok: boolean }> {
+  return req<{ ok: boolean }>(`/collections/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+
+export interface ContradictionResponse {
+  has_contradiction: boolean;
+  analysis: string;
+  scanned_chunks: number;
+}
+
+export async function detectContradictions(sourceFiles: string[]): Promise<ContradictionResponse> {
+  return req<ContradictionResponse>("/detect_contradictions", {
+    method: "POST",
+    body: JSON.stringify({ source_files: sourceFiles })
+  });
+}
+
+
+export interface FileVersion {
+  version_id: string;
+  timestamp: number;
+}
+
+export async function getFileVersions(sourceFile: string): Promise<{ versions: FileVersion[] }> {
+  return req<{ versions: FileVersion[] }>(`/versions?source_file=${encodeURIComponent(sourceFile)}`);
+}
+
+export async function getFileDiff(sourceFile: string, v1: string, v2: string): Promise<{ diff: string }> {
+  return req<{ diff: string }>(`/diff?source_file=${encodeURIComponent(sourceFile)}&v1=${encodeURIComponent(v1)}&v2=${encodeURIComponent(v2)}`);
+}
+
+export async function rebuildKnowledgeBase(): Promise<IngestResponse> {
+  return req<IngestResponse>("/rebuild_index", { method: "POST" });
 }
 
 export async function reindexKnowledgeBase(): Promise<IngestResponse> {
@@ -429,4 +504,59 @@ export async function askQuestion(
 
 export async function getGraph(): Promise<GraphResponse> {
   return req<GraphResponse>("/graph");
+}
+
+export interface StudyReview {
+  chunk_id: string;
+  text: string;
+  source_file: string;
+  page_number: string | null;
+  easiness: number;
+  repetitions: number;
+  interval: number;
+}
+
+export interface ExamQuestion {
+  question: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+}
+
+export interface StudyExam {
+  id: string;
+  topic: string;
+  created_at: string;
+  questions: ExamQuestion[];
+  score: string | null;
+  completed_at: string | null;
+}
+
+export async function getDueReviews(): Promise<{ due_reviews: StudyReview[] }> {
+  return req("/study/reviews");
+}
+
+export async function submitReview(chunkId: string, quality: number): Promise<{ status: string; next_review: number }> {
+  return req("/study/review", {
+    method: "POST",
+    body: JSON.stringify({ chunk_id: chunkId, quality })
+  });
+}
+
+export async function generateExam(topic: string, numQuestions: number = 5): Promise<StudyExam> {
+  return req("/study/exams/generate", {
+    method: "POST",
+    body: JSON.stringify({ topic, num_questions: numQuestions })
+  });
+}
+
+export async function getExams(): Promise<{ exams: StudyExam[] }> {
+  return req("/study/exams");
+}
+
+export async function submitExam(examId: string, answers: Record<string, string>): Promise<StudyExam> {
+  return req("/study/exams/submit", {
+    method: "POST",
+    body: JSON.stringify({ exam_id: examId, answers })
+  });
 }

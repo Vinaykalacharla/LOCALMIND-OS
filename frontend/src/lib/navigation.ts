@@ -12,6 +12,16 @@ export interface PageMeta {
 
 export const navItems: NavItem[] = [
   {
+    href: "/library",
+    label: "Library",
+    description: "View documents and versions"
+  },
+  {
+    href: "/collections",
+    label: "Workspaces",
+    description: "Manage persistent collections"
+  },
+  {
     href: "/",
     label: "Dashboard",
     description: "Overview and recent activity"
@@ -27,9 +37,14 @@ export const navItems: NavItem[] = [
     description: "Find relevant chunks"
   },
   {
-    href: "/chat",
-    label: "Chat",
-    description: "Ask questions on your data"
+    href: "/local-chat",
+    label: "Local Chat",
+    description: "Offline AI chat with your documents"
+  },
+  {
+    href: "/study",
+    label: "Study Mode",
+    description: "Spaced repetition & exam simulator"
   },
   {
     href: "/graph",
@@ -56,6 +71,20 @@ export function isActivePath(pathname: string, href: string): boolean {
 }
 
 export function getPageMeta(pathname: string): PageMeta {
+  if (pathname.startsWith("/library")) {
+    return {
+      eyebrow: "Documents",
+      title: "Library",
+      description: "View indexed files, extracted text versions, and document diffs."
+    };
+  }
+  if (pathname.startsWith("/collections")) {
+    return {
+      eyebrow: "Organization",
+      title: "Workspaces",
+      description: "Group your files into persistent collections for targeted search and study."
+    };
+  }
   if (pathname === "/") {
     return {
       eyebrow: "Mission Control",
@@ -80,11 +109,19 @@ export function getPageMeta(pathname: string): PageMeta {
     };
   }
 
-  if (pathname.startsWith("/chat")) {
+  if (pathname.startsWith("/local-chat") || pathname.startsWith("/chat")) {
     return {
-      eyebrow: "Grounded Answers",
-      title: "Chat with your data",
-      description: "Ask questions and review the supporting chunks used for each answer."
+      eyebrow: "Offline AI",
+      title: "Secure Chat",
+      description: "Chat with your documents using your local AI — fully offline, no API keys."
+    };
+  }
+
+  if (pathname.startsWith("/study")) {
+    return {
+      eyebrow: "Learning Engine",
+      title: "Study Mode",
+      description: "Spaced repetition reviews and AI-generated exam simulations."
     };
   }
 

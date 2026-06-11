@@ -5,24 +5,29 @@ interface StatCardProps {
   tone?: "default" | "brand" | "gold";
 }
 
-function toneClasses(tone: StatCardProps["tone"]): string {
-  if (tone === "brand") {
-    return "border-sky-300/15 bg-sky-300/5";
-  }
-
-  if (tone === "gold") {
-    return "border-amber-300/15 bg-amber-300/5";
-  }
-
-  return "border-white/8 bg-white/[0.025]";
-}
-
 export default function StatCard({ label, value, subtext, tone = "default" }: StatCardProps) {
   return (
-    <div className={`rounded-[20px] border p-5 shadow-panel backdrop-blur-xl ${toneClasses(tone)}`}>
-      <div className="text-[11px] font-medium uppercase tracking-[0.24em] text-zinc-400">{label}</div>
-      <div className="mt-4 font-display text-3xl font-semibold text-white">{value}</div>
-      {subtext ? <div className="mt-2 max-w-xs text-sm leading-6 text-zinc-400">{subtext}</div> : null}
+    <div className={`glow-card p-6 ${tone === 'brand' ? 'border-[var(--accent-dim)]' : tone === 'gold' ? 'border-[var(--warning-dim)]' : ''}`}>
+      <div className="flex items-center gap-3">
+        <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${tone === 'brand' ? 'bg-[var(--accent-dim)] text-[var(--accent-bright)]' : tone === 'gold' ? 'bg-[var(--warning-dim)] text-[var(--warning)]' : 'bg-[var(--panel-soft)] text-[var(--text-muted)]'}`}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+          </svg>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
+            {label}
+          </div>
+          <div className="mt-1 font-display text-2xl font-bold text-[var(--text-main)] tracking-tight">
+            {value}
+          </div>
+        </div>
+      </div>
+      {subtext && (
+        <div className="mt-4 border-t border-[var(--line)] pt-3 text-xs font-medium text-[var(--text-muted)]">
+          {subtext}
+        </div>
+      )}
     </div>
   );
 }

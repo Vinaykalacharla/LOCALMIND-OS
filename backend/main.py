@@ -23,6 +23,8 @@ from services.embeddings import EmbeddingService
 from services.graph import GraphBuilder
 from services.ingestion import extract_many
 from services.insights import build_insights
+from services.contradiction import detect_contradictions
+from services.versioning import VersioningService
 from services.rag import RAGEngine, _gguf_quality_score, extractive_answer
 from services.reranker import RerankerService
 from services.security import SecurityError, SecurityManager
@@ -50,6 +52,7 @@ else:
     MODELS_DIR = BASE_DIR / "models"
 DEMO_DATA_DIR = BASE_DIR / "demo_data"
 UPLOADS_DIR = DATA_DIR / "uploads"
+VERSIONS_DIR = DATA_DIR / "versions"
 
 CHUNKS_FILE = DATA_DIR / "chunks.jsonl"
 INDEX_FILE = DATA_DIR / "faiss.index"
@@ -60,6 +63,8 @@ QUERY_LOG_FILE = DATA_DIR / "query_log.jsonl"
 SECURITY_FILE = DATA_DIR / "security.json"
 MODEL_SETTINGS_FILE = DATA_DIR / "model_settings.json"
 CONVERSATIONS_FILE = DATA_DIR / "conversations.json"
+COLLECTIONS_FILE = DATA_DIR / "collections.json"
+STUDY_FILE = DATA_DIR / "study.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -105,6 +110,18 @@ class ModelSettingsRequest(BaseModel):
     embedding: Optional[str] = None
     reranker: Optional[str] = None
 
+class ReviewOutcomeRequest(BaseModel):
+    chunk_id: str
+    quality: int = Field(ge=0, le=5)
+
+class ExamGenerateRequest(BaseModel):
+    topic: str
+    num_questions: int = Field(default=5, ge=1, le=20)
+
+class ExamSubmitRequest(BaseModel):
+    exam_id: str
+    answers: Dict[str, str]
+
 
 @dataclass
 class RetrievalStats:
@@ -146,6 +163,8 @@ chunk_sequences: Dict[tuple[str, int | None], List[Dict[str, Any]]] = {}
 chunk_sequence_positions: Dict[str, int] = {}
 model_settings: Dict[str, str] = {"llm": "extractive-fallback", "embedding": "auto", "reranker": "auto"}
 conversations_store: List[Dict[str, Any]] = []
+collections_store: List[Dict[str, Any]] = []
+study_store: Dict[str, Any] = {"reviews": {}, "exams": []}
 
 security_manager = SecurityManager(SECURITY_FILE)
 embedding_service = EmbeddingService(MODELS_DIR)
@@ -154,6 +173,7 @@ graph_builder = GraphBuilder()
 reranker_service = RerankerService(MODELS_DIR)
 # Boot in extractive mode so startup does not eagerly load a GGUF model.
 rag_engine = RAGEngine(MODELS_DIR, preferred_local_model="extractive-fallback")
+versioning_service = VersioningService(VERSIONS_DIR)
 
 
 SEARCH_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -202,7 +222,8 @@ def utc_now_iso() -> str:
 
 
 def reset_runtime_state(*, clear_jobs: bool = False) -> None:
-    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index, retrieval_stats, chunk_sequences, chunk_sequence_positions, conversations_store
+    global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index, retrieval_stats, chunk_sequences, chunk_sequence_positions, conversations_store, study_store, collections_store
+    study_store = {"reviews": {}, "exams": []}
     chunks_store = []
     chunk_by_id = {}
     index_map = {}
@@ -212,6 +233,7 @@ def reset_runtime_state(*, clear_jobs: bool = False) -> None:
     chunk_sequences = {}
     chunk_sequence_positions = {}
     conversations_store = []
+    collections_store = []
     vector_index = VectorIndex()
     if clear_jobs:
         with jobs_lock:
@@ -279,6 +301,21 @@ def _save_model_settings(settings: Dict[str, str]) -> None:
             staged.unlink(missing_ok=True)
 
 
+
+def _load_collections() -> List[Dict[str, Any]]:
+    raw = _load_json_artifact(COLLECTIONS_FILE, [])
+    return raw if isinstance(raw, list) else []
+
+def _save_collections() -> None:
+    payload = json.dumps(collections_store, indent=2, ensure_ascii=True).encode("utf-8")
+    staged = _stage_bytes_file(COLLECTIONS_FILE, payload, encrypt=security_manager.configured)
+    try:
+        import os
+        os.replace(staged, COLLECTIONS_FILE)
+    finally:
+        if staged.exists():
+            staged.unlink(missing_ok=True)
+
 def _load_conversations() -> List[Dict[str, Any]]:
     raw = _load_json_artifact(CONVERSATIONS_FILE, [])
     if not isinstance(raw, list):
@@ -306,6 +343,22 @@ def _save_conversations() -> None:
     staged = _stage_bytes_file(CONVERSATIONS_FILE, payload, encrypt=security_manager.configured)
     try:
         os.replace(staged, CONVERSATIONS_FILE)
+    finally:
+        if staged.exists():
+            staged.unlink(missing_ok=True)
+
+def _load_study_data() -> None:
+    global study_store
+    raw = _load_json_artifact(STUDY_FILE, {"reviews": {}, "exams": []})
+    if isinstance(raw, dict):
+        study_store["reviews"] = raw.get("reviews", {})
+        study_store["exams"] = raw.get("exams", [])
+
+def _save_study_data() -> None:
+    payload = json.dumps(study_store, indent=2, ensure_ascii=True).encode("utf-8")
+    staged = _stage_bytes_file(STUDY_FILE, payload, encrypt=security_manager.configured)
+    try:
+        os.replace(staged, STUDY_FILE)
     finally:
         if staged.exists():
             staged.unlink(missing_ok=True)
@@ -629,6 +682,9 @@ def _build_model_manager_response(validation: Optional[Dict[str, Any]] = None) -
     }
     return {
         "indexed_chunks": len(chunks_store),
+
+        "hardware": system_info(),
+
         "reindex_recommended": _reindex_recommended(chunks_store, meta, vector_index),
         "index_embedding_model": str(meta.get("embedding_model") or ""),
         "index_embedding_signature": str(meta.get("embedding_signature") or ""),
@@ -1002,6 +1058,8 @@ def load_persisted_state() -> None:
     meta = _load_json_artifact(META_FILE, {})
     graph_cache = _load_json_artifact(GRAPH_FILE, {"nodes": [], "edges": []})
     conversations_store = _load_conversations()
+    global collections_store
+    collections_store = _load_collections()
     vector_index = load_vector_index()
     stack = _build_runtime_stack(_load_model_settings(), chunks_store)
     _apply_runtime_stack(stack)
@@ -1041,6 +1099,13 @@ def process_ingestion(job_id: str, file_paths: List[Path]) -> None:
         if not docs:
             update_job(job_id, state="error", step="extracting", progress=100, message="No readable text found")
             return
+
+        for doc in docs:
+            try:
+                versioning_service.save_version(doc.source_file, doc.text)
+            except Exception as e:
+                print(f"Failed to save version for {doc.source_file}: {e}")
+
 
         update_job(job_id, state="processing", step="chunking", progress=35, message="Creating chunks")
         skipped_files: List[str] = []
@@ -1148,6 +1213,119 @@ startup_load()
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, **security_manager.status()}
+
+
+@app.get("/system/info")
+def system_info() -> Dict[str, Any]:
+    """
+    Returns machine hardware info and recommended local AI models
+    based on available RAM. Used for first-time setup suggestions.
+    No auth required — called before the vault is unlocked.
+    """
+    import platform
+
+    ram_gb = 0
+    try:
+        import psutil  # type: ignore
+        ram_gb = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+    except Exception:
+        # psutil not installed — fall back to stdlib platform info only
+        ram_gb = 0
+
+    # Determine tier from available RAM
+    if ram_gb >= 28:
+        tier = "high"
+    elif ram_gb >= 14:
+        tier = "medium"
+    elif ram_gb >= 6:
+        tier = "low"
+    else:
+        tier = "minimal"
+
+    # Model recommendation table keyed by tier
+    MODEL_RECOMMENDATIONS: Dict[str, List[Dict[str, Any]]] = {
+        "high": [
+            {
+                "ollama_id": "qwen2.5:14b",
+                "label": "Qwen 2.5 · 14B",
+                "size_gb": 9.0,
+                "quality": "Excellent",
+                "speed": "Moderate",
+                "description": "Best offline quality. Deep reasoning, long context, highly accurate citations. Ideal for serious research.",
+                "recommended": True,
+            },
+            {
+                "ollama_id": "qwen2.5:7b",
+                "label": "Qwen 2.5 · 7B",
+                "size_gb": 4.7,
+                "quality": "Very Good",
+                "speed": "Fast",
+                "description": "Great balance of quality and speed on high-RAM machines.",
+                "recommended": False,
+            },
+        ],
+        "medium": [
+            {
+                "ollama_id": "qwen2.5:7b",
+                "label": "Qwen 2.5 · 7B",
+                "size_gb": 4.7,
+                "quality": "Very Good",
+                "speed": "Fast",
+                "description": "Strong, fluent answers with good citation quality. Best fit for 16–32 GB machines.",
+                "recommended": True,
+            },
+            {
+                "ollama_id": "qwen2.5:3b",
+                "label": "Qwen 2.5 · 3B",
+                "size_gb": 2.0,
+                "quality": "Good",
+                "speed": "Very Fast",
+                "description": "Lighter model, faster responses. Good for quick study sessions.",
+                "recommended": False,
+            },
+        ],
+        "low": [
+            {
+                "ollama_id": "qwen2.5:1.5b",
+                "label": "Qwen 2.5 · 1.5B",
+                "size_gb": 1.1,
+                "quality": "Good",
+                "speed": "Very Fast",
+                "description": "Optimized for 8 GB RAM. Lightweight, fast, and great for students and daily use.",
+                "recommended": True,
+            },
+            {
+                "ollama_id": "qwen2.5:3b",
+                "label": "Qwen 2.5 · 3B",
+                "size_gb": 2.0,
+                "quality": "Better",
+                "speed": "Fast",
+                "description": "Slightly heavier than 1.5B but noticeably better quality if RAM allows.",
+                "recommended": False,
+            },
+        ],
+        "minimal": [
+            {
+                "ollama_id": "qwen2.5:1.5b",
+                "label": "Qwen 2.5 · 1.5B",
+                "size_gb": 1.1,
+                "quality": "Good",
+                "speed": "Very Fast",
+                "description": "The lightest available model. Works even on older machines with limited RAM.",
+                "recommended": True,
+            },
+        ],
+    }
+
+    recommendations = MODEL_RECOMMENDATIONS.get(tier, MODEL_RECOMMENDATIONS["low"])
+
+    return {
+        "ram_gb": ram_gb,
+        "ram_detected": ram_gb > 0,
+        "platform": platform.system(),
+        "tier": tier,
+        "recommendations": recommendations,
+    }
 
 
 @app.get("/security/status")
@@ -1395,6 +1573,60 @@ def validate_models(payload: ModelSettingsRequest) -> Dict[str, Any]:
         return response
 
 
+
+@app.get("/collections")
+def list_collections() -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        return {"collections": collections_store}
+
+@app.post("/collections")
+def create_collection(payload: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_unlocked()
+    collection = {
+        "id": uuid.uuid4().hex,
+        "name": payload.get("name", "New Workspace"),
+        "files": payload.get("files", []),
+        "created_at": utc_now_iso(),
+    }
+    with index_lock:
+        collections_store.append(collection)
+        _save_collections()
+        return collection
+
+@app.delete("/collections/{collection_id}")
+def delete_collection(collection_id: str) -> Dict[str, bool]:
+    ensure_unlocked()
+    with index_lock:
+        global collections_store
+        collections_store = [c for c in collections_store if c.get("id") != collection_id]
+        _save_collections()
+    return {"ok": True}
+
+@app.post("/rebuild_index")
+def rebuild_index(background_tasks: BackgroundTasks = None) -> Dict[str, str]:
+    ensure_unlocked()
+    with index_lock:
+        # clear FAISS and chunks to trigger full ingestion of existing uploads
+        global chunks_store, chunk_by_id, index_map, meta, graph_cache, vector_index, retrieval_stats
+        chunks_store = []
+        chunk_by_id = {}
+        index_map = {}
+        meta = {}
+        graph_cache = {"nodes": [], "edges": []}
+        retrieval_stats = _empty_retrieval_stats()
+        vector_index = VectorIndex()
+        # write the empty state
+        commit_prepared_state(PreparedIndexState([], {}, {}, {}, {"nodes": [], "edges": []}, vector_index, None))
+        
+    job_id = create_job()
+    uploads = [p for p in UPLOADS_DIR.rglob("*") if p.is_file()]
+    if background_tasks is None:
+        process_ingestion(job_id, uploads)
+    else:
+        background_tasks.add_task(process_ingestion, job_id, uploads)
+    return {"job_id": job_id}
+
 @app.post("/reindex")
 def reindex(background_tasks: BackgroundTasks = None) -> Dict[str, str]:
     ensure_unlocked()
@@ -1408,6 +1640,41 @@ def reindex(background_tasks: BackgroundTasks = None) -> Dict[str, str]:
         background_tasks.add_task(process_reindex, job_id)
     return {"job_id": job_id}
 
+
+
+class ContradictionRequest(BaseModel):
+    source_files: List[str] = Field(default_factory=list)
+
+@app.post("/detect_contradictions")
+def api_detect_contradictions(payload: ContradictionRequest) -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        if not chunks_store:
+            raise HTTPException(status_code=400, detail="No indexed data available")
+        
+        target_chunks = chunks_store
+        if payload.source_files:
+            allowed = set(payload.source_files)
+            target_chunks = [c for c in chunks_store if c.get("source_file") in allowed]
+            
+        if not target_chunks:
+            raise HTTPException(status_code=400, detail="No chunks found for specified files")
+            
+    # We run the detection outside the lock to avoid blocking other requests during LLM generation
+    return detect_contradictions(rag_engine, target_chunks)
+
+
+@app.get("/versions")
+def get_file_versions(source_file: str) -> Dict[str, Any]:
+    ensure_unlocked()
+    versions = versioning_service.get_versions(source_file)
+    return {"versions": versions}
+
+@app.get("/diff")
+def get_file_diff(source_file: str, v1: str, v2: str) -> Dict[str, str]:
+    ensure_unlocked()
+    diff_text = versioning_service.get_diff(source_file, v1, v2)
+    return {"diff": diff_text}
 
 @app.get("/evaluate")
 def evaluate() -> Dict[str, Any]:
@@ -2335,6 +2602,151 @@ def graph() -> Dict[str, Any]:
     ensure_unlocked()
     with index_lock:
         return graph_cache
+
+
+
+
+@app.get("/study/reviews")
+def get_due_reviews() -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        now = datetime.now(timezone.utc).timestamp()
+        due_chunks = []
+        # Find chunks that are due
+        for chunk in chunks_store:
+            chunk_id = chunk.get("chunk_id")
+            if not chunk_id: continue
+            review_data = study_store["reviews"].get(chunk_id, {})
+            next_review = review_data.get("next_review", 0)
+            if next_review <= now:
+                due_chunks.append({
+                    "chunk_id": chunk_id,
+                    "text": chunk.get("text", ""),
+                    "source_file": chunk.get("source_file", ""),
+                    "page_number": chunk.get("page_number", ""),
+                    "easiness": review_data.get("easiness", 2.5),
+                    "repetitions": review_data.get("repetitions", 0),
+                    "interval": review_data.get("interval", 0)
+                })
+                if len(due_chunks) >= 20:
+                    break
+        return {"due_reviews": due_chunks}
+
+@app.post("/study/review")
+def submit_review(req: ReviewOutcomeRequest) -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        chunk_id = req.chunk_id
+        q = req.quality
+        
+        review_data = study_store["reviews"].get(chunk_id, {
+            "easiness": 2.5,
+            "repetitions": 0,
+            "interval": 0,
+            "next_review": 0
+        })
+        
+        if q >= 3:
+            if review_data["repetitions"] == 0:
+                interval = 1
+            elif review_data["repetitions"] == 1:
+                interval = 6
+            else:
+                interval = round(review_data["interval"] * review_data["easiness"])
+            repetitions = review_data["repetitions"] + 1
+        else:
+            repetitions = 0
+            interval = 1
+            
+        easiness = review_data["easiness"] + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
+        easiness = max(1.3, easiness)
+        
+        now = datetime.now(timezone.utc).timestamp()
+        next_review = now + (interval * 86400)
+        
+        study_store["reviews"][chunk_id] = {
+            "easiness": easiness,
+            "repetitions": repetitions,
+            "interval": interval,
+            "next_review": next_review
+        }
+        _save_study_data()
+        return {"status": "ok", "next_review": next_review}
+
+@app.post("/study/exams/generate")
+def generate_exam(req: ExamGenerateRequest) -> Dict[str, Any]:
+    ensure_unlocked()
+    search_query = req.topic
+    with index_lock:
+        res = vector_index.search(embedding_service.embed_query(search_query), top_k=10)
+        context_texts = []
+        for doc_idx in res.indices:
+            chunk_id = index_map.get(str(doc_idx))
+            if chunk_id and chunk_id in chunk_by_id:
+                context_texts.append(chunk_by_id[chunk_id]["text"])
+        
+    if not context_texts:
+        raise HTTPException(status_code=400, detail="No relevant context found for this topic.")
+        
+    # Generate mock questions based on the retrieved text since LLM JSON generation can be flaky
+    # We will build a simple robust generator
+    questions = []
+    for i, text in enumerate(context_texts[:req.num_questions]):
+        words = text.split()
+        if len(words) < 5:
+            continue
+        # simple mock question
+        topic_snippet = " ".join(words[:10])
+        questions.append({
+            "question": f"According to the text regarding '{topic_snippet}...', what is the key takeaway?",
+            "options": [
+                "It describes " + " ".join(words[10:15]),
+                "It is completely unrelated",
+                "None of the above",
+                "All of the above"
+            ],
+            "correct_answer": "It describes " + " ".join(words[10:15]),
+            "explanation": "Based directly on the source document."
+        })
+        
+    exam_id = uuid.uuid4().hex[:10]
+    exam_data = {
+        "id": exam_id,
+        "topic": req.topic,
+        "created_at": utc_now_iso(),
+        "questions": questions,
+        "score": None,
+        "completed_at": None
+    }
+    with index_lock:
+        study_store["exams"].append(exam_data)
+        _save_study_data()
+        
+    return exam_data
+
+@app.get("/study/exams")
+def get_exams() -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        return {"exams": study_store["exams"]}
+
+@app.post("/study/exams/submit")
+def submit_exam(req: ExamSubmitRequest) -> Dict[str, Any]:
+    ensure_unlocked()
+    with index_lock:
+        for exam in study_store["exams"]:
+            if exam["id"] == req.exam_id:
+                correct = 0
+                for q in exam["questions"]:
+                    ans = req.answers.get(q["question"])
+                    if ans == q["correct_answer"]:
+                        correct += 1
+                score_pct = int((correct / max(1, len(exam["questions"]))) * 100)
+                exam["score"] = f"{score_pct}%"
+                exam["completed_at"] = utc_now_iso()
+                _save_study_data()
+                return exam
+        raise HTTPException(status_code=404, detail="Exam not found")
 
 
 if __name__ == "__main__":
