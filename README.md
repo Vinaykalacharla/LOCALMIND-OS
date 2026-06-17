@@ -185,18 +185,15 @@ cd backend
 
 Frontend production build:
 
-```powershell
-cd frontend
-npm run build
-```
-
 ## Roadmap
 
-- Rebuild/reindex controls from the UI
-- Contradiction detection across uploaded files
-- Persistent collections / workspaces
-- Version-aware document diffs
-- Stronger local model options for larger machines
+- [x] Rebuild/reindex controls from the UI
+- [x] Contradiction detection across uploaded files
+- [x] Persistent collections / workspaces
+- [x] Version-aware document diffs
+- [x] Stronger local model options for larger machines
+
+*All current roadmap items have been implemented and shipped in the latest release. The team is evaluating new capabilities for the next phase.*
 
 ## Local Documentation
 
