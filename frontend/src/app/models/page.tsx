@@ -11,7 +11,8 @@ import {
   ModelManagerResponse,
   rebuildKnowledgeBase,
   reindexKnowledgeBase,
-  validateModelManagerSettings
+  validateModelManagerSettings,
+  toggleAssistant
 } from "@/lib/api";
 import { useToast } from "@/components/ToastProvider";
 import { formatNumber } from "@/lib/format";
@@ -46,7 +47,8 @@ export default function ModelsPage() {
   const [applying, setApplying] = useState(false);
   const [validating, setValidating] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
+    const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
+  const [assistantEnabled, setAssistantEnabled] = useState(false);
   const { pushToast } = useToast();
 
   async function loadManager(showErrorToast = true) {
@@ -157,6 +159,17 @@ export default function ModelsPage() {
   }
 
   
+  
+  async function onToggleAssistant() {
+    try {
+      const res = await toggleAssistant(!assistantEnabled);
+      setAssistantEnabled(res.enabled);
+      pushToast("success", res.enabled ? "Global Voice Assistant Enabled" : "Global Voice Assistant Disabled");
+    } catch (e) {
+      pushToast("error", "Failed to toggle assistant");
+    }
+  }
+
   async function onRebuild() {
     if (jobId && jobStatus?.state === "processing") return;
     if (!confirm("This will clear the current index and re-ingest all files from the uploads folder. Continue?")) return;

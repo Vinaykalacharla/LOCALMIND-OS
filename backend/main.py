@@ -24,6 +24,7 @@ from services.graph import GraphBuilder
 from services.ingestion import extract_many
 from services.insights import build_insights
 from services.contradiction import detect_contradictions
+from services.assistant import assistant_service
 from services.versioning import VersioningService
 from services.rag import RAGEngine, _gguf_quality_score, extractive_answer
 from services.reranker import RerankerService
@@ -1197,6 +1198,9 @@ def save_uploads(job_id: str, files: List[UploadFile]) -> List[Path]:
 
 
 def startup_load() -> None:
+    # Start Assistant Thread
+    assistant_service.start()
+
     reset_runtime_state(clear_jobs=True)
 
 
@@ -1523,6 +1527,19 @@ def delete_conversation(session_id: str) -> Dict[str, bool]:
         _save_conversations()
     return {"ok": True}
 
+
+
+@app.post("/assistant/toggle")
+def toggle_assistant(payload: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_unlocked()
+    enabled = bool(payload.get("enabled", False))
+    assistant_service.toggle(enabled)
+    return {"ok": True, "enabled": enabled}
+
+@app.get("/assistant/status")
+def assistant_status() -> Dict[str, Any]:
+    ensure_unlocked()
+    return {"enabled": getattr(assistant_service, "enabled", False)}
 
 @app.get("/models")
 def get_models() -> Dict[str, Any]:

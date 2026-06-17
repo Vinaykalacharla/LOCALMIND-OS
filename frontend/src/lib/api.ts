@@ -392,6 +392,18 @@ export async function getFileDiff(sourceFile: string, v1: string, v2: string): P
   return req<{ diff: string }>(`/diff?source_file=${encodeURIComponent(sourceFile)}&v1=${encodeURIComponent(v1)}&v2=${encodeURIComponent(v2)}`);
 }
 
+
+export async function toggleAssistant(enabled: boolean): Promise<{ ok: boolean; enabled: boolean }> {
+  return req<{ ok: boolean; enabled: boolean }>('/assistant/toggle', {
+    method: 'POST',
+    body: JSON.stringify({ enabled })
+  });
+}
+
+export async function getAssistantStatus(): Promise<{ enabled: boolean }> {
+  return req<{ enabled: boolean }>('/assistant/status');
+}
+
 export async function rebuildKnowledgeBase(): Promise<IngestResponse> {
   return req<IngestResponse>("/rebuild_index", { method: "POST" });
 }

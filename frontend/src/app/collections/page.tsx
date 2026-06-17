@@ -102,25 +102,26 @@ export default function CollectionsPage() {
               <div className="text-sm text-zinc-500 italic text-center py-8">No workspaces created yet.</div>
             ) : (
               collections.map(c => (
-                <div key={c.id} className="flex items-center justify-between p-4 rounded-xl bg-white/[0.02] border border-white/8 hover:bg-white/[0.04] transition">
-                  <div>
-                    <h3 className="font-semibold text-white">{c.name}</h3>
-                    <p className="text-xs text-zinc-500 mt-1">{c.files.length} files attached</p>
+                <div key={c.id} className="mb-4">
+                  <div className="flex items-center justify-between p-4 rounded-xl bg-white/[0.02] border border-white/8 hover:bg-white/[0.04] transition">
+                    <div>
+                      <h3 className="font-semibold text-white">{c.name}</h3>
+                      <p className="text-xs text-zinc-500 mt-1">{c.files.length} files attached</p>
+                    </div>
+                    <div className="flex gap-3">
+                      <button onClick={() => handleAnalyze(c)} disabled={analyzingId === c.id} className="btn-secondary text-xs disabled:opacity-60">
+                        {analyzingId === c.id ? "Analyzing..." : "Analyze Contradictions"}
+                      </button>
+                      <button onClick={() => handleDelete(c.id)} className="btn-secondary text-xs border-red-500/20 text-red-400 hover:bg-red-500/10">Delete</button>
+                    </div>
                   </div>
-                  <div className="flex gap-3">
-                    <button onClick={() => handleAnalyze(c)} disabled={analyzingId === c.id} className="btn-secondary text-xs disabled:opacity-60">
-                      {analyzingId === c.id ? "Analyzing..." : "Analyze Contradictions"}
-                    </button>
-                    <button onClick={() => handleDelete(c.id)} className="btn-secondary text-xs border-red-500/20 text-red-400 hover:bg-red-500/10">Delete</button>
-                  </div>
+                  {analysisResult[c.id] && (
+                    <div className="p-4 mt-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sm text-sky-100 whitespace-pre-wrap">
+                      <div className="font-semibold mb-2 text-sky-300">Contradiction Analysis:</div>
+                      {analysisResult[c.id]}
+                    </div>
+                  )}
                 </div>
-                {analysisResult[c.id] && (
-                  <div className="p-4 mt-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sm text-sky-100 whitespace-pre-wrap">
-                    <div className="font-semibold mb-2 text-sky-300">Contradiction Analysis:</div>
-                    {analysisResult[c.id]}
-                  </div>
-                )}
-
               ))
             )}
           </div>

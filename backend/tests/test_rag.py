@@ -185,7 +185,7 @@ class ExtractiveAnswerTests(unittest.TestCase):
         )
 
         self.assertNotIn("Key evidence:", answer)
-        self.assertIn("Supporting points:", answer)
+        self.assertIn("**Sources:**", answer)
         self.assertIn("network.txt", answer)
 
 
