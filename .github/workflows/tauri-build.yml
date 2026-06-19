@@ -23,6 +23,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: false
 
       # ─── Node ────────────────────────────────────────────────────────────
       - name: Setup Node.js
@@ -74,7 +76,6 @@ jobs:
           chmod +x src-tauri/bin/localmind-backend-${RUST_TARGET}
 
       # ─── Ollama sidecar ──────────────────────────────────────────────────
-      # Using Ollama v0.6.8 — latest stable with consistent zip-based downloads
       - name: Download Ollama sidecar — Windows
         if: matrix.os-name == 'windows'
         shell: pwsh
@@ -84,7 +85,6 @@ jobs:
             -Uri "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-windows-amd64.zip" `
             -OutFile "ollama-windows.zip"
           Expand-Archive -Path "ollama-windows.zip" -DestinationPath "ollama-windows-extracted" -Force
-          # The zip contains ollama.exe at the root level
           Copy-Item "ollama-windows-extracted/ollama.exe" `
             "src-tauri/bin/ollama-x86_64-pc-windows-msvc.exe"
 
@@ -95,10 +95,8 @@ jobs:
           ARCH=$(uname -m)
           if [ "$ARCH" = "arm64" ]; then
             RUST_TARGET="aarch64-apple-darwin"
-            OLLAMA_ARCH="arm64"
           else
             RUST_TARGET="x86_64-apple-darwin"
-            OLLAMA_ARCH="amd64"
           fi
           curl -fsSL -o ollama-macos.zip \
             "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-darwin.zip"
@@ -142,7 +140,6 @@ jobs:
         run: npm install -g @tauri-apps/cli@^1
 
       - name: Build Tauri application
-        # TAURI_SKIP_DEVSERVER_CHECK prevents tauri from requiring a running dev server
         env:
           TAURI_SKIP_DEVSERVER_CHECK: "true"
         run: tauri build
@@ -172,16 +169,15 @@ jobs:
           $version = "${{ steps.version-win.outputs.VERSION }}"
           $tag = "v$version"
           $title = "LocalMind OS v$version"
-          $notes = "## LocalMind OS v$version`n`nStandalone desktop installer. Bundles Ollama and the LocalMind backend.`n`n### Downloads`n- **Windows**: `.msi` (recommended) or `.exe` (NSIS setup)`n- **macOS**: `.dmg`"
-          
-          # Create release if it does not exist yet; if it already exists, just upload
+          $notes = "LocalMind OS v$version - Standalone desktop installer. Bundles Ollama and the LocalMind backend. Windows: MSI or NSIS EXE installer. macOS: DMG."
+
           $msi  = (Get-ChildItem src-tauri/target/release/bundle/msi/*.msi  -ErrorAction SilentlyContinue) | Select-Object -First 1 -ExpandProperty FullName
           $nsis = (Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe -ErrorAction SilentlyContinue) | Select-Object -First 1 -ExpandProperty FullName
-          
+
           $files = @()
           if ($msi)  { $files += $msi }
           if ($nsis) { $files += $nsis }
-          
+
           $existing = gh release view $tag 2>&1
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag @files --title $title --notes $notes
@@ -197,10 +193,10 @@ jobs:
           VERSION="${{ steps.version-mac.outputs.VERSION }}"
           TAG="v${VERSION}"
           TITLE="LocalMind OS v${VERSION}"
-          NOTES="## LocalMind OS v${VERSION}\n\nStandalone desktop installer. Bundles Ollama and the LocalMind backend.\n\n### Downloads\n- **Windows**: \`.msi\` (recommended) or \`.exe\` (NSIS setup)\n- **macOS**: \`.dmg\`"
-          
+          NOTES="LocalMind OS v${VERSION} - Standalone desktop installer. Bundles Ollama and the LocalMind backend. Windows: MSI or NSIS EXE installer. macOS: DMG."
+
           DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
-          
+
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "$DMG" --clobber
           else
