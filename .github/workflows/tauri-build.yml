@@ -101,8 +101,35 @@ jobs:
           curl -fsSL -o ollama-macos.zip \
             "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-darwin.zip"
           unzip -o ollama-macos.zip -d ollama-macos-extracted
-          cp ollama-macos-extracted/ollama src-tauri/bin/ollama-${RUST_TARGET}
+
+          # v0.6.x ships Ollama.app (Electron bundle). Find the server binary.
+          OLLAMA_BIN=""
+          for CANDIDATE in \
+            "ollama-macos-extracted/Ollama.app/Contents/MacOS/ollama" \
+            "ollama-macos-extracted/Ollama.app/Contents/Resources/ollama" \
+            "ollama-macos-extracted/ollama"; do
+            if [ -f "$CANDIDATE" ]; then
+              OLLAMA_BIN="$CANDIDATE"
+              echo "Found ollama binary at: $CANDIDATE"
+              break
+            fi
+          done
+
+          # Dynamic fallback: search all executables named 'ollama'
+          if [ -z "$OLLAMA_BIN" ]; then
+            OLLAMA_BIN=$(find ollama-macos-extracted -type f -name "ollama" | head -1)
+            echo "Fallback find result: $OLLAMA_BIN"
+          fi
+
+          if [ -z "$OLLAMA_BIN" ]; then
+            echo "=== ERROR: ollama binary not found. Listing extracted executables: ==="
+            find ollama-macos-extracted -type f -perm +111 | head -30
+            exit 1
+          fi
+
+          cp "$OLLAMA_BIN" src-tauri/bin/ollama-${RUST_TARGET}
           chmod +x src-tauri/bin/ollama-${RUST_TARGET}
+          echo "Ollama sidecar ready: src-tauri/bin/ollama-${RUST_TARGET}"
 
       # ─── Icons ───────────────────────────────────────────────────────────
       - name: Download Tauri default icons — Windows
