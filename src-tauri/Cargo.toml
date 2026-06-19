@@ -1,6 +1,6 @@
 [package]
 name = "localmind-os"
-version = "1.0.0"
+version = "1.1.16"
 description = "LocalMind OS Desktop App"
 authors = ["Vinaykalacharla"]
 license = "MIT"

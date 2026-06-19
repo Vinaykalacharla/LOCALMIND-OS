@@ -11,13 +11,18 @@ def build():
         if os.path.exists(folder):
             print(f"Cleaning {folder}...")
             shutil.rmtree(folder)
-            
+
+    # PyInstaller --add-data separator is OS-specific:
+    #   Windows: semicolon (;)
+    #   macOS/Linux: colon (:)
+    sep = ";" if sys.platform == "win32" else ":"
+
     # PyInstaller command
     cmd = [
         "pyinstaller",
         "--name=localmind-backend",
         "--onefile",
-        "--add-data=demo_data;demo_data",
+        f"--add-data=demo_data{sep}demo_data",
         # hidden imports for libraries that are loaded dynamically (e.g., Uvicorn modules)
         "--hidden-import=uvicorn.logging",
         "--hidden-import=uvicorn.loops",
@@ -41,7 +46,11 @@ def build():
     try:
         import PyInstaller.__main__
         PyInstaller.__main__.run(cmd[1:])
-        print("Backend build completed successfully via PyInstaller! Executable is at dist/localmind-backend.exe")
+        print("Backend build completed successfully via PyInstaller!")
+        if sys.platform == "win32":
+            print("Executable is at dist/localmind-backend.exe")
+        else:
+            print("Executable is at dist/localmind-backend")
     except ImportError:
         # Fallback to subprocess if PyInstaller is not installed in the current environment
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -50,7 +59,7 @@ def build():
             print("stdout:", result.stdout)
             print("stderr:", result.stderr)
             sys.exit(1)
-        print("Backend build completed successfully! Executable is at dist/localmind-backend.exe")
+        print("Backend build completed successfully!")
 
 if __name__ == "__main__":
     build()

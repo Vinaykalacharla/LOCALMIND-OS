@@ -3,6 +3,10 @@
 
 PyMuPDF>=1.26
 sentence-transformers>=3.4
-faiss-cpu>=1.10
+faiss-cpu>=1.9,<1.11
 spacy>=3.8
-llama-cpp-python>=0.3
+
+# NOTE: llama-cpp-python is NOT included here because it requires a C++ compiler
+# and takes 30-60 minutes to build from source on CI runners.
+# For local development, install it separately:
+#   pip install llama-cpp-python>=0.3

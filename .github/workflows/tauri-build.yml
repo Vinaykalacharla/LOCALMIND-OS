@@ -13,112 +13,196 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [windows-latest, macos-latest]
+        include:
+          - platform: windows-latest
+            os-name: windows
+          - platform: macos-14
+            os-name: macos
 
     runs-on: ${{ matrix.platform }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: setup node
+      # ─── Node ────────────────────────────────────────────────────────────
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: setup rust
+      # ─── Rust ────────────────────────────────────────────────────────────
+      - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: rust cache
+      - name: Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: setup python
+      # ─── Python ──────────────────────────────────────────────────────────
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: install python dependencies
+      - name: Install Python dependencies (core + AI)
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt -r backend/requirements-ai.txt pyinstaller
 
-      - name: build python backend
-        run: |
-          cd backend
-          python build_backend.py
+      # ─── Backend binary ──────────────────────────────────────────────────
+      - name: Build Python backend (PyInstaller)
+        working-directory: backend
+        run: python build_backend.py
 
-      - name: copy backend to tauri sidecar bin (Windows)
-        if: runner.os == 'Windows'
+      - name: Copy backend sidecar — Windows
+        if: matrix.os-name == 'windows'
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/bin
-          Copy-Item backend/dist/localmind-backend.exe src-tauri/bin/localmind-backend-x86_64-pc-windows-msvc.exe
-        shell: pwsh
+          Copy-Item backend/dist/localmind-backend.exe `
+            src-tauri/bin/localmind-backend-x86_64-pc-windows-msvc.exe
 
-      - name: copy backend to tauri sidecar bin (macOS)
-        if: runner.os == 'macOS'
+      - name: Copy backend sidecar — macOS
+        if: matrix.os-name == 'macos'
         run: |
           mkdir -p src-tauri/bin
           ARCH=$(uname -m)
-          if [ "$ARCH" = "arm64" ]; then RUST_ARCH="aarch64"; else RUST_ARCH="x86_64"; fi
-          cp backend/dist/localmind-backend src-tauri/bin/localmind-backend-${RUST_ARCH}-apple-darwin
-          chmod +x src-tauri/bin/localmind-backend-${RUST_ARCH}-apple-darwin
+          if [ "$ARCH" = "arm64" ]; then RUST_TARGET="aarch64-apple-darwin"; else RUST_TARGET="x86_64-apple-darwin"; fi
+          cp backend/dist/localmind-backend src-tauri/bin/localmind-backend-${RUST_TARGET}
+          chmod +x src-tauri/bin/localmind-backend-${RUST_TARGET}
 
-      - name: download and embed ollama sidecar (Windows)
-        if: runner.os == 'Windows'
+      # ─── Ollama sidecar ──────────────────────────────────────────────────
+      # Using Ollama v0.6.8 — latest stable with consistent zip-based downloads
+      - name: Download Ollama sidecar — Windows
+        if: matrix.os-name == 'windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/ollama/ollama/releases/download/v0.1.48/ollama-windows-amd64.zip" -OutFile "ollama.zip"
-          Expand-Archive -Path "ollama.zip" -DestinationPath "ollama_extracted"
-          Copy-Item "ollama_extracted/ollama.exe" "src-tauri/bin/ollama-x86_64-pc-windows-msvc.exe"
+          New-Item -ItemType Directory -Force -Path src-tauri/bin
+          Invoke-WebRequest `
+            -Uri "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-windows-amd64.zip" `
+            -OutFile "ollama-windows.zip"
+          Expand-Archive -Path "ollama-windows.zip" -DestinationPath "ollama-windows-extracted" -Force
+          # The zip contains ollama.exe at the root level
+          Copy-Item "ollama-windows-extracted/ollama.exe" `
+            "src-tauri/bin/ollama-x86_64-pc-windows-msvc.exe"
 
-      - name: download and embed ollama sidecar (macOS)
-        if: runner.os == 'macOS'
+      - name: Download Ollama sidecar — macOS
+        if: matrix.os-name == 'macos'
         run: |
           mkdir -p src-tauri/bin
           ARCH=$(uname -m)
-          if [ "$ARCH" = "arm64" ]; then RUST_ARCH="aarch64"; else RUST_ARCH="x86_64"; fi
-          curl -L -o src-tauri/bin/ollama-${RUST_ARCH}-apple-darwin https://github.com/ollama/ollama/releases/download/v0.1.48/ollama-darwin
-          chmod +x src-tauri/bin/ollama-${RUST_ARCH}-apple-darwin
+          if [ "$ARCH" = "arm64" ]; then
+            RUST_TARGET="aarch64-apple-darwin"
+            OLLAMA_ARCH="arm64"
+          else
+            RUST_TARGET="x86_64-apple-darwin"
+            OLLAMA_ARCH="amd64"
+          fi
+          curl -fsSL -o ollama-macos.zip \
+            "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-darwin.zip"
+          unzip -o ollama-macos.zip -d ollama-macos-extracted
+          cp ollama-macos-extracted/ollama src-tauri/bin/ollama-${RUST_TARGET}
+          chmod +x src-tauri/bin/ollama-${RUST_TARGET}
 
-      - name: download default tauri icons
+      # ─── Icons ───────────────────────────────────────────────────────────
+      - name: Download Tauri default icons — Windows
+        if: matrix.os-name == 'windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/icons
-          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/128x128.png" -OutFile "src-tauri/icons/128x128.png"
-          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/128x128@2x.png" -OutFile "src-tauri/icons/128x128@2x.png"
-          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/32x32.png" -OutFile "src-tauri/icons/32x32.png"
-          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/icon.icns" -OutFile "src-tauri/icons/icon.icns"
-          Invoke-WebRequest -Uri "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons/icon.ico" -OutFile "src-tauri/icons/icon.ico"
+          $base = "https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons"
+          foreach ($icon in @("128x128.png","128x128@2x.png","32x32.png","icon.icns","icon.ico")) {
+            if (-Not (Test-Path "src-tauri/icons/$icon")) {
+              Invoke-WebRequest -Uri "$base/$icon" -OutFile "src-tauri/icons/$icon"
+            }
+          }
 
-      - name: install frontend dependencies
+      - name: Download Tauri default icons — macOS
+        if: matrix.os-name == 'macos'
         run: |
-          cd frontend
-          npm install
+          mkdir -p src-tauri/icons
+          BASE="https://github.com/tauri-apps/tauri/raw/tauri-v1/tooling/cli/templates/app/src-tauri/icons"
+          for icon in 128x128.png "128x128@2x.png" 32x32.png icon.icns icon.ico; do
+            [ -f "src-tauri/icons/$icon" ] || curl -fsSL -o "src-tauri/icons/$icon" "$BASE/$icon"
+          done
 
-      - name: install tauri cli
+      # ─── Frontend ────────────────────────────────────────────────────────
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Build frontend (Next.js static export)
+        working-directory: frontend
+        run: npm run build
+
+      # ─── Tauri build ─────────────────────────────────────────────────────
+      - name: Install Tauri CLI v1
         run: npm install -g @tauri-apps/cli@^1
 
-      - name: build tauri application
+      - name: Build Tauri application
+        # TAURI_SKIP_DEVSERVER_CHECK prevents tauri from requiring a running dev server
+        env:
+          TAURI_SKIP_DEVSERVER_CHECK: "true"
         run: tauri build
 
-      - name: create draft release (Windows)
-        if: runner.os == 'Windows'
+      # ─── Publish GitHub Release ──────────────────────────────────────────
+      - name: Read version from tauri.conf.json — Windows
+        if: matrix.os-name == 'windows'
+        id: version-win
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).package.version
+          echo "VERSION=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Read version from tauri.conf.json — macOS
+        if: matrix.os-name == 'macos'
+        id: version-mac
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['package']['version'])")
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release and upload Windows artifacts
+        if: matrix.os-name == 'windows'
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).package.version
-          try {
-            gh release create "v$version" src-tauri/target/release/bundle/msi/*.msi src-tauri/target/release/bundle/nsis/*.exe --title "LocalMind OS v$version" --notes "Standalone LocalMind OS desktop installer. Includes support for local Ollama and local vector search." --draft
-          } catch {
-            gh release upload "v$version" src-tauri/target/release/bundle/msi/*.msi src-tauri/target/release/bundle/nsis/*.exe
+          $version = "${{ steps.version-win.outputs.VERSION }}"
+          $tag = "v$version"
+          $title = "LocalMind OS v$version"
+          $notes = "## LocalMind OS v$version`n`nStandalone desktop installer. Bundles Ollama and the LocalMind backend.`n`n### Downloads`n- **Windows**: `.msi` (recommended) or `.exe` (NSIS setup)`n- **macOS**: `.dmg`"
+          
+          # Create release if it does not exist yet; if it already exists, just upload
+          $msi  = (Get-ChildItem src-tauri/target/release/bundle/msi/*.msi  -ErrorAction SilentlyContinue) | Select-Object -First 1 -ExpandProperty FullName
+          $nsis = (Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe -ErrorAction SilentlyContinue) | Select-Object -First 1 -ExpandProperty FullName
+          
+          $files = @()
+          if ($msi)  { $files += $msi }
+          if ($nsis) { $files += $nsis }
+          
+          $existing = gh release view $tag 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag @files --title $title --notes $notes
+          } else {
+            gh release upload $tag @files --clobber
           }
 
-      - name: create draft release (macOS)
-        if: runner.os == 'macOS'
+      - name: Publish release and upload macOS artifacts
+        if: matrix.os-name == 'macos'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(jq -r .package.version src-tauri/tauri.conf.json)
-          gh release create "v$VERSION" src-tauri/target/release/bundle/dmg/*.dmg --title "LocalMind OS v$VERSION" --notes "Standalone LocalMind OS desktop installer. Includes support for local Ollama and local vector search." --draft || gh release upload "v$VERSION" src-tauri/target/release/bundle/dmg/*.dmg
+          VERSION="${{ steps.version-mac.outputs.VERSION }}"
+          TAG="v${VERSION}"
+          TITLE="LocalMind OS v${VERSION}"
+          NOTES="## LocalMind OS v${VERSION}\n\nStandalone desktop installer. Bundles Ollama and the LocalMind backend.\n\n### Downloads\n- **Windows**: \`.msi\` (recommended) or \`.exe\` (NSIS setup)\n- **macOS**: \`.dmg\`"
+          
+          DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
+          
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" --clobber
+          else
+            gh release create "$TAG" "$DMG" --title "$TITLE" --notes "$NOTES"
+          fi

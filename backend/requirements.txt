@@ -1,16 +1,12 @@
+# Core server dependencies
 fastapi>=0.115,<1
 uvicorn[standard]>=0.32,<1
 python-multipart>=0.0.19
-numpy>=2.2
+numpy>=1.26,<3
 PyPDF2>=3.0
 cryptography>=44,<46
-scikit-learn==1.4.1.post1
-networkx==3.2.1
+scikit-learn>=1.5.0
+networkx>=3.2
 
-# Background Assistant
-keyboard==0.13.5
+# Background Assistant (audio features — install requirements-audio.txt separately for these)
 Pillow>=10.3.0
-pyttsx3==2.90
-vosk>=0.3.45
-sounddevice>=0.5.1
-SpeechRecognition>=3.10.4

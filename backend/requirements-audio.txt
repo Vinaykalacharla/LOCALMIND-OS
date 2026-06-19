@@ -1,0 +1,9 @@
+# Audio/voice assistant features — optional, for local development only.
+# These packages require native OS audio libraries (PortAudio, Windows Audio Session API)
+# and CANNOT be installed in CI/GitHub Actions runners.
+# Install locally with: pip install -r requirements-audio.txt
+keyboard==0.13.5
+pyttsx3==2.90
+vosk>=0.3.45
+sounddevice>=0.5.1
+SpeechRecognition>=3.10.4
